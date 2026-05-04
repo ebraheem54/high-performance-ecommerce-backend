@@ -3,7 +3,7 @@ Serializers for products API.
 """
 
 from rest_framework import serializers
-from products.models import Product, InventoryLog, Review
+from apps.products.models import Product, InventoryLog, Review
 
 
 class ProductSerializer(serializers.ModelSerializer):

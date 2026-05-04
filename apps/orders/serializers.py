@@ -3,7 +3,7 @@ Serializers for orders API.
 """
 
 from rest_framework import serializers
-from orders.models import Order, OrderItem, Payment
+from apps.orders.models import Order, OrderItem, Payment
 
 
 class OrderItemSerializer(serializers.ModelSerializer):
@@ -16,7 +16,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
     def get_subtotal(self, obj):
         return obj.unit_price * obj.quantity
 
-    
+
 class PaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment

@@ -11,9 +11,9 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 
-from orders import services
-from orders.models import Order
-from orders.serializers import OrderSerializer, OrderListSerializer
+from apps.orders import services
+from apps.orders.models import Order
+from apps.orders.serializers import OrderSerializer, OrderListSerializer
 
 
 # Customer endpoints

@@ -1,5 +1,5 @@
 from django.contrib import admin
-from products.models import Product, InventoryLog, OrderLock, Review
+from apps.products.models import Product, InventoryLog, OrderLock, Review
 
 
 @admin.register(Product)

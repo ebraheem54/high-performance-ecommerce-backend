@@ -3,7 +3,7 @@ Serializers for cart API.
 """
 
 from rest_framework import serializers
-from cart.models import CartItem
+from apps.cart.models import CartItem
 
 
 class CartItemSerializer(serializers.ModelSerializer):

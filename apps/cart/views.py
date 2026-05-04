@@ -10,8 +10,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from cart import services
-from cart.serializers import CartItemSerializer, AddToCartSerializer
+from apps.cart import services
+from apps.cart.serializers import CartItemSerializer, AddToCartSerializer
 
 
 def _block_admin(request):

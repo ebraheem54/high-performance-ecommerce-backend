@@ -14,10 +14,10 @@ urlpatterns = [
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
 
     # App routes
-    path("api/users/", include("users.urls", namespace="users")),
-    path("api/products/", include("products.urls", namespace="products")),
-    path("api/orders/", include("orders.urls", namespace="orders")),
-    path("api/cart/", include("cart.urls", namespace="cart")),
+    path("api/users/", include("apps.users.urls", namespace="users")),
+    path("api/products/", include("apps.products.urls", namespace="products")),
+    path("api/orders/", include("apps.orders.urls", namespace="orders")),
+    path("api/cart/", include("apps.cart.urls", namespace="cart")),
     # Uncomment after creating notifications and reports apps locally:
     # path("api/notifications/", include("notifications.urls", namespace="notifications")),
     # path("api/reports/", include("reports.urls", namespace="reports")),

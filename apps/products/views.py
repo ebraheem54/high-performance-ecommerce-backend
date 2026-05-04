@@ -15,9 +15,9 @@ from rest_framework.permissions import (
 )
 from rest_framework.response import Response
 
-from products import services
-from products.models import Product, Review
-from products.serializers import (
+from apps.products import services
+from apps.products.models import Product, Review
+from apps.products.serializers import (
     ProductSerializer,
     ProductDetailSerializer,
     InventoryLogSerializer,

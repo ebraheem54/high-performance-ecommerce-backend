@@ -20,7 +20,6 @@ ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="*").split(",")
 
 # ── Custom User Model ─────────────────────────────────────────────────────────
 AUTH_USER_MODEL = "users.User"
-
 # ── Installed Apps ────────────────────────────────────────────────────────────
 INSTALLED_APPS = [
     # Django built-ins
@@ -43,6 +42,7 @@ INSTALLED_APPS = [
     "apps.products",
     "apps.orders",
     "apps.cart",
+    'apps.core',
     # "apps.notifications",
     # "apps.reports",
 

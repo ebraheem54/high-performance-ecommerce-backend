@@ -1,5 +1,5 @@
 from django.contrib import admin
-from orders.models import Order, OrderItem, Payment
+from apps.orders.models import Order, OrderItem, Payment
 
 
 class OrderItemInline(admin.TabularInline):

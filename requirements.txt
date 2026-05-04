@@ -24,3 +24,5 @@ django-redis>=5.4,<6.0
 python-decouple>=3.8,<4.0
 
 
+#for seeder
+faker==33.3.1

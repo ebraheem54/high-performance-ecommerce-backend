@@ -3,7 +3,7 @@ URL mappings for the products API.
 """
 
 from django.urls import path
-from products import views
+from apps.products import views
 
 app_name = "products"
 
