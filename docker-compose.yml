@@ -1,0 +1,174 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ecommerce_db
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - dev-db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ecommerce-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ecommerce-network
+
+  migrate:
+    build:
+      context: .
+      args:
+        DEV: "true"
+    env_file:
+      - .env
+    command: >
+      sh -c "
+        echo 'Waiting for database at ${DB_HOST}:${DB_PORT}...'
+        until nc -z ${DB_HOST} ${DB_PORT}; do
+          sleep 0.5
+        done
+        echo 'Database started'
+
+        echo 'Running migrations...'
+        python manage.py migrate --noinput
+        echo 'Migrations completed'
+      "
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ecommerce-network
+
+  app:
+    build:
+      context: .
+      args:
+        DEV: "true"
+    container_name: ecommerce_app
+    restart: unless-stopped
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    command: >
+      sh -c "
+        echo 'Waiting for database at ${DB_HOST}:${DB_PORT}...'
+        until nc -z ${DB_HOST} ${DB_PORT}; do
+          sleep 0.5
+        done
+        echo 'Database started'
+
+        echo 'Starting server...'
+        python manage.py runserver 0.0.0.0:8000
+      "
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - ecommerce-network
+
+  celery_worker:
+    build:
+      context: .
+      args:
+        DEV: "true"
+    container_name: ecommerce_celery_worker
+    restart: unless-stopped
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    command: >
+      sh -c "
+        echo 'Waiting for database at ${DB_HOST}:${DB_PORT}...'
+        until nc -z ${DB_HOST} ${DB_PORT}; do
+          sleep 0.5
+        done
+        echo 'Database started'
+
+        echo 'Starting Celery worker...'
+        celery -A config worker -l info --concurrency=4
+      "
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - ecommerce-network
+
+  celery_beat:
+    build:
+      context: .
+      args:
+        DEV: "true"
+    container_name: ecommerce_celery_beat
+    restart: unless-stopped
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    command: >
+      sh -c "
+        echo 'Waiting for database at ${DB_HOST}:${DB_PORT}...'
+        until nc -z ${DB_HOST} ${DB_PORT}; do
+          sleep 0.5
+        done
+        echo 'Database started'
+
+        echo 'Starting Celery beat...'
+        celery -A config beat -l info --scheduler django_celery_beat.schedulers.DatabaseScheduler
+      "
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - ecommerce-network
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: ecommerce_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+    networks:
+      - ecommerce-network
+
+volumes:
+  dev-db-data:
+  redis-data:
+
+networks:
+  ecommerce-network:
+    driver: bridge
