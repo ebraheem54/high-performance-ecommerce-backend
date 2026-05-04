@@ -34,12 +34,13 @@ INSTALLED_APPS = [
     "drf_spectacular",
 
     # Local apps
-    "users",
-    "products",
-    "orders",
-    "cart",
-    # "notifications",
-    # "reports",
+    "apps.users",
+    "apps.products",
+    "apps.orders",
+    "apps.cart",
+    # "apps.notifications",
+    # "apps.reports",
+
 ]
 
 # ── Middleware ────────────────────────────────────────────────────────────────
