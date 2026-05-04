@@ -2,11 +2,16 @@
 Django settings for High-Performance E-Commerce Backend.
 Based on Django 4.2
 """
+import os
+import sys
 
 from pathlib import Path
 from decouple import config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+# Add apps/ to Python path so apps can be imported as bare modules
+# e.g. `from products import views` instead of `from apps.products import views`
+
 
 # ── Security ──────────────────────────────────────────────────────────────────
 SECRET_KEY = config("SECRET_KEY", default="django-insecure-change-me-in-production")
