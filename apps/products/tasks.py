@@ -11,7 +11,7 @@ def release_expired_locks_task():
     Periodic task: release all expired order locks.
     Scheduled via Celery Beat (e.g. every 5 minutes).
     """
-    from products.services import release_expired_locks
+    from apps.products.services import release_expired_locks
     count = release_expired_locks()
     return f"Released {count} expired order locks."
 
@@ -30,7 +30,7 @@ def alert_low_stock(product_id: int, threshold: int = 10):
     Check if a product stock is below the threshold and send a notification.
     Called after every stock deduction.
     """
-    from products.models import Product
+    from apps.products.models import Product
     from notifications.services import create_notification_for_admins
 
     try:

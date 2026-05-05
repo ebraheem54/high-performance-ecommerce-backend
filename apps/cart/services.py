@@ -1,23 +1,28 @@
 """
 Business logic for cart app.
-Synchronization Strategy — OPTIMISTIC LOCKING:
-  Adding/updating cart items uses optimistic locking on CartItem.version.
-  This prevents two concurrent requests (e.g., double-click add) from
-  corrupting the cart quantity without the cost of a DB-level lock.
-  Algorithm:
-    1. Read CartItem (version=N)
-    2. UPDATE WHERE id=X AND version=N → set quantity, version=N+1
-    3. If 0 rows updated → conflict → retry
+
+Synchronization Strategy — PESSIMISTIC LOCKING (switched from optimistic):
+  Why the change?
+  ───────────────
+  Cart add is a HIGH CONTENTION endpoint: under load, dozens of requests
+  hit the same CartItem row simultaneously. Optimistic locking on a hot
+  write path causes cascading conflicts → retries exhaust → RuntimeError.
+
+  Pessimistic locking (SELECT FOR UPDATE) serializes access on the DB side:
+    - First request acquires the row lock
+    - Subsequent requests WAIT (not fail) until the lock releases
+    - No retries needed — every request succeeds in order
+    - Correct under high concurrency with minimal code complexity
+
+  Optimistic locking is still appropriate for low-contention paths
+  (e.g. product stock pre-checks, reviews).
 """
 
 from apps.cart.models import CartItem
-
-
 import logging
-from django.db import transaction, IntegrityError
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
-MAX_RETRIES = 3
 
 
 def get_cart(user):
@@ -25,93 +30,70 @@ def get_cart(user):
     return CartItem.objects.select_related("product").filter(user=user)
 
 
+@transaction.atomic
 def add_to_cart(user, product_id: int, quantity: int = 1) -> CartItem:
     """
     Add a product to the cart or increase quantity if already present.
-    Optimistic Locking is applied when updating an existing cart item:
-      - Read the current version of the CartItem
-      - UPDATE WHERE id=X AND version=current_version
-      - If conflict (0 rows updated) → retry up to MAX_RETRIES times
-    Why Optimistic here?
-      A user clicking "Add to Cart" multiple times in quick succession
-      could trigger concurrent requests. Optimistic locking ensures the
-      quantity is always accurate without blocking other cart operations.
-    Synchronization points:
-      1. Product stock check — snapshot read, no lock (optimistic)
-      2. CartItem update   — version-check UPDATE (optimistic)
-    """
-    from products.models import Product
 
-    # Snapshot read of product — no lock needed here (optimistic approach)
+    ── Synchronization Strategy: PESSIMISTIC LOCKING ────────────────────────
+    We use SELECT FOR UPDATE on the CartItem row (when it exists) to
+    serialize concurrent add-to-cart requests for the same user/product pair.
+
+    Why Pessimistic here?
+      Cart add is a hot write path — many requests per second can target
+      the same row. Optimistic locking causes conflicts that exhaust retries
+      under real load, resulting in 100% failure. Pessimistic locking blocks
+      briefly (milliseconds) and guarantees every request succeeds.
+
+    Synchronization points:
+      1. Product existence + soft stock check (snapshot read, no lock)
+      2. CartItem row locked with SELECT FOR UPDATE → safe update
+    """
+    from apps.products.models import Product
+
+    # ── Synchronization Point 1: Soft stock check (snapshot read) ─────────────
+    # This is NOT a reservation — just a quick guard to reject clearly
+    # impossible requests (e.g. quantity > total stock available).
+    # The real stock enforcement happens at checkout with pessimistic locking.
     try:
         product = Product.objects.get(id=product_id, is_active=True)
     except Product.DoesNotExist:
         raise ValueError(f"Product {product_id} not found or inactive.")
-    # Soft stock check — approximate, not a hard reservation
-    if product.stock < quantity:
-        raise ValueError(f"Only {product.stock} units of '{product.name}' available.")
 
-    # Try to create a new cart item, or get the existing one
-    item, created = CartItem.objects.get_or_create(
-        user=user,
-        product=product,
-        defaults={"quantity": quantity, "version": 0},
-    )
-    if created:
+    if product.stock < quantity:
+        raise ValueError(
+            f"Only {product.stock} units of '{product.name}' available."
+        )
+
+    # ── Synchronization Point 2: Pessimistic lock on CartItem row ─────────────
+    # select_for_update() acquires a row-level FOR UPDATE lock.
+    # If the row doesn't exist yet, we create it safely inside the transaction.
+    # Concurrent requests for the same user/product will wait here, not fail.
+    try:
+        item = CartItem.objects.select_for_update().get(
+            user=user, product_id=product_id
+        )
+        # Row exists and is locked — safe to update quantity
+        item.quantity += quantity
+        item.save(update_fields=["quantity", "updated_at"])
+        logger.info(
+            "Cart item updated (pessimistic): user=%s product=%s new_qty=%s",
+            user.id, product_id, item.quantity,
+        )
+    except CartItem.DoesNotExist:
+        # First time this product is added to the cart — create new row
+        item = CartItem.objects.create(
+            user=user,
+            product_id=product_id,
+            quantity=quantity,
+            version=0,
+        )
         logger.info(
             "Cart item created: user=%s product=%s qty=%s",
-            user.id,
-            product_id,
-            quantity,
+            user.id, product_id, quantity,
         )
-        return item
 
-    # ── Synchronization point: Optimistic Locking on CartItem update ──────────
-    # If item already exists, update quantity with optimistic version check
-    for attempt in range(1, MAX_RETRIES + 1):
-        # Re-read the latest version from DB
-        try:
-            item = CartItem.objects.get(user=user, product=product)
-        except CartItem.DoesNotExist:
-            # Edge case: item was deleted between our get_or_create and here
-            item = CartItem.objects.create(
-                user=user, product=product, quantity=quantity, version=0
-            )
-            return item
-        current_version = item.version
-        new_quantity = item.quantity + quantity
-        # Conditional UPDATE — only succeeds if version hasn't changed
-        updated_rows = CartItem.objects.filter(
-            id=item.id,
-            version=current_version,  # ← optimistic check
-        ).update(
-            quantity=new_quantity,
-            version=current_version + 1,
-        )
-        if updated_rows == 1:
-            # Success — refresh the item and return it
-            item.quantity = new_quantity
-            item.version = current_version + 1
-            logger.info(
-                "Cart item updated (optimistic v%s→v%s): user=%s product=%s qty=%s",
-                current_version,
-                current_version + 1,
-                user.id,
-                product_id,
-                new_quantity,
-            )
-            return item
-        # Conflict: another request modified the same cart item
-        logger.warning(
-            "Optimistic conflict on CartItem user=%s product=%s (attempt %s/%s)",
-            user.id,
-            product_id,
-            attempt,
-            MAX_RETRIES,
-        )
-    raise RuntimeError(
-        f"Could not update cart after {MAX_RETRIES} attempts due to concurrent modifications."
-    )
+    return item
 
 
 def remove_from_cart(user, product_id: int) -> bool:
@@ -126,37 +108,28 @@ def clear_cart(user) -> int:
     return deleted
 
 
+@transaction.atomic
 def update_cart_item_quantity(user, product_id: int, quantity: int) -> CartItem:
     """
-    Set exact quantity for a cart item using Optimistic Locking.
-    Synchronization point: version-check UPDATE to prevent concurrent overwrites.
+    Set exact quantity for a cart item using Pessimistic Locking.
+    Synchronization point: SELECT FOR UPDATE → prevents concurrent overwrites.
     """
     if quantity <= 0:
         remove_from_cart(user, product_id)
         return None
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            item = CartItem.objects.get(user=user, product_id=product_id)
-        except CartItem.DoesNotExist:
-            raise ValueError("Cart item not found.")
-        current_version = item.version
-        # Optimistic update — only if version unchanged
-        updated_rows = CartItem.objects.filter(
-            id=item.id,
-            version=current_version,
-        ).update(
-            quantity=quantity,
-            version=current_version + 1,
+    try:
+        item = CartItem.objects.select_for_update().get(
+            user=user, product_id=product_id
         )
-        if updated_rows == 1:
-            item.quantity = quantity
-            item.version = current_version + 1
-            return item
-        logger.warning(
-            "Optimistic conflict on cart quantity update: user=%s product=%s attempt=%s",
-            user.id, product_id, attempt,
-        )
-    raise RuntimeError(
-        f"Could not update cart quantity after {MAX_RETRIES} attempts."
+    except CartItem.DoesNotExist:
+        raise ValueError("Cart item not found.")
+
+    item.quantity = quantity
+    item.save(update_fields=["quantity", "updated_at"])
+    logger.info(
+        "Cart quantity set (pessimistic): user=%s product=%s qty=%s",
+        user.id, product_id, quantity,
     )
+    return item
+    

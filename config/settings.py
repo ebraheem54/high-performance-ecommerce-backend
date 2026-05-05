@@ -2,6 +2,7 @@
 Django settings for High-Performance E-Commerce Backend.
 Based on Django 4.2
 """
+
 import os
 import sys
 
@@ -29,29 +30,26 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-
     # Third-party
     "rest_framework",
     "rest_framework.authtoken",
     "corsheaders",
     "django_celery_beat",
     "drf_spectacular",
-
     # Local apps
     "apps.users",
     "apps.products",
     "apps.orders",
     "apps.cart",
-    'apps.core',
+    "apps.core",
     # "apps.notifications",
     # "apps.reports",
-
 ]
 
 # ── Middleware ────────────────────────────────────────────────────────────────
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    "corsheaders.middleware.CorsMiddleware",          # must be before CommonMiddleware
+    "corsheaders.middleware.CorsMiddleware",  # must be before CommonMiddleware
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -84,18 +82,28 @@ WSGI_APPLICATION = "config.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME":     config("DB_NAME",     default="ecommerce_db"),
-        "USER":     config("DB_USER",     default="postgres"),
+        "NAME": config("DB_NAME", default="ecommerce_db"),
+        "USER": config("DB_USER", default="postgres"),
         "PASSWORD": config("DB_PASSWORD", default="postgres"),
-        "HOST":     config("DB_HOST",     default="db"),
-        "PORT":     config("DB_PORT",     default="5432"),
-
+        "HOST": config("DB_HOST", default="db"),
+        "PORT": config("DB_PORT", default="5432"),
     }
 }
 
+
+# ── DB Connection Pooling — Resource Management (Requirement 2) ───────────────
+# CONN_MAX_AGE reuses open DB connections across requests instead of
+# opening a new TCP connection for every request.
+# 60 s = connections survive for 1 minute of idle time before being closed.
+# This dramatically reduces connection overhead under high concurrency.
+DATABASES["default"]["CONN_MAX_AGE"] = config("CONN_MAX_AGE", default=60, cast=int)
+
+
 # ── Password Validation ───────────────────────────────────────────────────────
 AUTH_PASSWORD_VALIDATORS = [
-    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"
+    },
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
@@ -119,13 +127,18 @@ REST_FRAMEWORK = {
         "rest_framework.permissions.IsAuthenticated",
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    # Throttling — Resource Management (Requirement 2)
-    "DEFAULT_THROTTLE_CLASSES": [],
-  "DEFAULT_THROTTLE_RATES": {
-    "anon": "200/min",
-    "user": "2000/min",
+    # AnonRateThrottle + UserRateThrottle protect the server from abuse
+    # and prevent a single client from starving shared DB connections.
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "300/min",
+        "user": "3000/min",
+    },
 }
-}
+
 
 # ── Redis Cache — Distributed Caching (Requirement 6) ────────────────────────
 CACHES = {
@@ -139,9 +152,9 @@ CACHES = {
 }
 
 # ── Celery — Async Queues (Requirement 3) ─────────────────────────────────────
-CELERY_BROKER_URL      = config("REDIS_URL", default="redis://redis:6379/0")
-CELERY_RESULT_BACKEND  = config("REDIS_URL", default="redis://redis:6379/0")
-CELERY_ACCEPT_CONTENT  = ["json"]
+CELERY_BROKER_URL = config("REDIS_URL", default="redis://redis:6379/0")
+CELERY_RESULT_BACKEND = config("REDIS_URL", default="redis://redis:6379/0")
+CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
@@ -154,19 +167,19 @@ CELERY_WORKER_CONCURRENCY = config("CELERY_CONCURRENCY", default=4, cast=int)
 from celery.schedules import crontab
 
 CELERY_BEAT_SCHEDULE = {
-    # Nightly batch: aggregate daily sales at 1:00 AM
+    # Nightly batch: aggregate daily sales at 1:00 AM — Requirement 4
     "daily-sales-report": {
-        "task": "reports.tasks.run_daily_sales_batch_task",
+        "task": "apps.core.tasks.run_daily_sales_batch_task",
         "schedule": crontab(hour=1, minute=0),
     },
     # Release expired order locks every 5 minutes
     "release-expired-locks": {
-        "task": "products.tasks.release_expired_locks_task",
+        "task": "apps.products.tasks.release_expired_locks_task",
         "schedule": crontab(minute="*/5"),
     },
-    # Clean up abandoned carts every Sunday at midnight
+    # Clean up abandoned carts every Sunday at midnight — Requirement 4
     "cleanup-abandoned-carts": {
-        "task": "cart.tasks.cleanup_abandoned_carts",
+        "task": "apps.cart.tasks.cleanup_abandoned_carts",
         "schedule": crontab(hour=0, minute=0, day_of_week=0),
     },
 }

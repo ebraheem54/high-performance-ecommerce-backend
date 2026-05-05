@@ -13,7 +13,7 @@ def cleanup_abandoned_carts(days_old: int = 30):
     """
     from django.utils import timezone
     from datetime import timedelta
-    from cart.models import CartItem
+    from apps.cart.models import CartItem
 
     cutoff = timezone.now() - timedelta(days=days_old)
     deleted, _ = CartItem.objects.filter(updated_at__lt=cutoff).delete()

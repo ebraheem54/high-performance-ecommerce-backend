@@ -13,7 +13,7 @@ def generate_invoice_task(order_id: int):
     Generate a PDF invoice for the order asynchronously.
     Decoupled from the checkout HTTP response — user doesn't wait for this.
     """
-    from orders.models import Order
+    from apps.orders.models import Order
     try:
         order = Order.objects.prefetch_related("items__product").get(id=order_id)
         # TODO: generate PDF and store in object storage
@@ -25,7 +25,7 @@ def generate_invoice_task(order_id: int):
 @shared_task
 def update_order_status_task(order_id: int, new_status: str):
     """Update order status asynchronously (e.g. after payment webhook)."""
-    from orders.models import Order
+    from apps.orders.models import Order
     try:
         Order.objects.filter(id=order_id).update(status=new_status)
         print(f"[TASK] Order #{order_id} status updated to {new_status}")

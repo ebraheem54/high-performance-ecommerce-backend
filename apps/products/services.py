@@ -21,8 +21,9 @@ import logging
 from apps.products.models import Product, InventoryLog, OrderLock
 
 logger = logging.getLogger(__name__)
+
 # Maximum retry attempts for optimistic locking conflicts
-OPTIMISTIC_MAX_RETRIES = 3
+OPTIMISTIC_MAX_RETRIES = 5
 # Delay between retries (seconds) — gives other transactions time to commit
 OPTIMISTIC_RETRY_DELAY = 0.05
 
@@ -72,17 +73,17 @@ def deduct_stock_optimistic(
             f"Insufficient stock: {product.stock} available, {quantity} requested."
         )
     captured_version = product.version
+
     # Step 2: Conditional UPDATE — only succeeds if version hasn't changed
     # Synchronization point: this is where the race condition is resolved.
-
     # Optimistic Locking: update only if version has not changed since we read it
     updated_rows = Product.objects.filter(
         id=product_id,
-        version=captured_version,  # ← the optimistic check
-        stock__gte=quantity,  # ← safety guard
+        version=captured_version,   # ← the optimistic check
+        stock__gte=quantity,        # ← safety guard
     ).update(
         stock=product.stock - quantity,
-        version=captured_version + 1,  # ← bump version on every write
+        version=captured_version + 1,   # ← bump version on every write
     )
 
     if updated_rows == 0:
@@ -93,6 +94,7 @@ def deduct_stock_optimistic(
             captured_version,
         )
         return False  # Signal conflict to caller
+
     # Step 3: Audit log — record every stock change for traceability
     InventoryLog.objects.create(
         product_id=product_id,
@@ -108,6 +110,71 @@ def deduct_stock_optimistic(
         captured_version + 1,
     )
     return True
+
+
+def deduct_stock_with_retry(
+    product_id: int,
+    quantity: int,
+    reason: str = InventoryLog.Reason.PURCHASE,
+    max_retries: int = OPTIMISTIC_MAX_RETRIES,
+    retry_delay: float = OPTIMISTIC_RETRY_DELAY,
+) -> bool:
+    """
+    Retry wrapper around deduct_stock_optimistic.
+    Implements the full Optimistic Locking pattern with automatic retry:
+      - On conflict (False return): wait briefly and retry
+      - On success (True return): done
+      - On ValueError (no stock): re-raise immediately — no point retrying
+      - After max_retries exhausted: raise RuntimeError
+    Resource Management (Requirement 2):
+      retry_delay with exponential back-off prevents thundering herd
+      when many workers compete for the same product simultaneously.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            success = deduct_stock_optimistic(product_id, quantity, reason)
+            if success:
+                return True
+            # Version conflict — back off and retry
+            logger.warning(
+                "Optimistic retry %s/%s for product=%s qty=%s",
+                attempt, max_retries, product_id, quantity,
+            )
+            time.sleep(retry_delay * attempt)  # exponential back-off
+        except ValueError:
+            raise  # not enough stock — no point retrying
+    raise RuntimeError(
+        f"Could not deduct stock for product={product_id} after "
+        f"{max_retries} optimistic retries."
+    )
+
+
+@transaction.atomic
+def deduct_stock_pessimistic(product: Product, quantity: int) -> None:
+    """
+    Deduct stock from an already-locked product row.
+    Called from orders.services where SELECT FOR UPDATE was already issued.
+    The product object passed in is already under a DB-level lock.
+    """
+    if product.stock < quantity:
+        raise ValueError(
+            f"Insufficient stock for '{product.name}': "
+            f"{product.stock} available, {quantity} requested."
+        )
+    product.stock -= quantity
+    product.version += 1
+    product.save(update_fields=["stock", "version", "updated_at"])
+
+    InventoryLog.objects.create(
+        product=product,
+        quantity_change=-quantity,
+        reason=InventoryLog.Reason.PURCHASE,
+        note=f"[PESSIMISTIC] checkout deduction version→{product.version}",
+    )
+    logger.info(
+        "Pessimistic stock deduct: product=%s qty=%s new_stock=%s",
+        product.id, quantity, product.stock,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -190,7 +257,7 @@ def create_order_lock(product_id: int, user_id: int, quantity: int,
     Uses Pessimistic Locking to guarantee the reservation is exclusive.
     """
     from datetime import timedelta
-   # Pessimistic: lock the product row during reservation
+    # Pessimistic: lock the product row during reservation
     product = Product.objects.select_for_update().get(id=product_id)
 
     if product.stock < quantity:
