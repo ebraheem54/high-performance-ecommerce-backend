@@ -89,6 +89,7 @@ DATABASES = {
         "PASSWORD": config("DB_PASSWORD", default="postgres"),
         "HOST":     config("DB_HOST",     default="db"),
         "PORT":     config("DB_PORT",     default="5432"),
+
     }
 }
 
@@ -119,14 +120,11 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     # Throttling — Resource Management (Requirement 2)
-    "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
-    ],
-    "DEFAULT_THROTTLE_RATES": {
-        "anon": "100/hour",
-        "user": "1000/hour",
-    },
+    "DEFAULT_THROTTLE_CLASSES": [],
+  "DEFAULT_THROTTLE_RATES": {
+    "anon": "200/min",
+    "user": "2000/min",
+}
 }
 
 # ── Redis Cache — Distributed Caching (Requirement 6) ────────────────────────

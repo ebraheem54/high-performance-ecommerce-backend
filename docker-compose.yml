@@ -165,6 +165,18 @@ services:
     networks:
       - ecommerce-network
 
+  locust:
+    image: locustio/locust
+    container_name: ecommerce_locust
+    working_dir: /mnt/locust
+    volumes:
+      - .:/mnt/locust
+    ports:
+      - "8089:8089"
+    networks:
+      - ecommerce-network
+    command: -f locustfile.py -H http://app:8000
+    
 volumes:
   dev-db-data:
   redis-data:

@@ -24,4 +24,4 @@ def deactivate_user(user_id: int) -> bool:
         user.save(update_fields=["is_active"])
         return True
     except User.DoesNotExist:
-        return False
+        return FalseThrottle
