@@ -29,3 +29,6 @@ faker==33.3.1
 
 #for testing (like k6 in js)
 locust>=2.20,<3.0
+
+# Production server — Resource Management (Requirement 2)
+gunicorn>=21.2,<22.0
