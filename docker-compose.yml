@@ -74,6 +74,7 @@ services:
     restart: unless-stopped
     volumes:
       - .:/app
+      - static-data:/app/staticfiles
     env_file:
       - .env
     command: >
@@ -85,7 +86,7 @@ services:
         echo 'Database started'
 
         echo 'Starting server...'
-         gunicorn --workers=4 --bind=0.0.0.0:8000 config.wsgi:application
+         gunicorn --workers=9 --bind=0.0.0.0:8000 config.wsgi:application
       "
     depends_on:
       migrate:
@@ -184,6 +185,7 @@ services:
         - "80:80"
       volumes:
         - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+        - static-data:/static
       depends_on:
         - app
       networks:
@@ -192,6 +194,7 @@ services:
 volumes:
   dev-db-data:
   redis-data:
+  static-data:
 
 networks:
   ecommerce-network:

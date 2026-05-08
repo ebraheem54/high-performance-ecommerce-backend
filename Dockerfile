@@ -1,15 +1,11 @@
 FROM python:3.11-alpine3.18
 LABEL maintainer="ebraheemdeveloper.com"
-
 ENV PYTHONUNBUFFERED=1
-
 COPY ./requirements.txt /tmp/requirements.txt
 COPY ./requirements.dev.txt /tmp/requirements.dev.txt
 WORKDIR /app
 EXPOSE 8000
-
 ARG DEV=false
-
 RUN python -m venv /py && \
     /py/bin/pip install --upgrade pip && \
     apk add --no-cache \
@@ -23,7 +19,7 @@ RUN python -m venv /py && \
         netcat-openbsd && \
     apk add --no-cache --virtual .tmp-build-deps \
         build-base \
-        postgresql-dev \
+        postgresql15-dev \
         musl-dev && \
     /py/bin/pip install -r /tmp/requirements.txt && \
     if [ "$DEV" = "true" ]; then \
@@ -35,10 +31,7 @@ RUN python -m venv /py && \
         --disabled-password \
         --no-create-home \
         django-user
-
 ENV PATH="/py/bin:$PATH"
-
 COPY . /app
 USER django-user
-
 CMD ["gunicorn", "--workers=9", "--bind=0.0.0.0:8000", "config.wsgi:application"]
