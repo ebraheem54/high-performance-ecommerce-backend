@@ -131,12 +131,11 @@ REST_FRAMEWORK = {
     # AnonRateThrottle + UserRateThrottle protect the server from abuse
     # and prevent a single client from starving shared DB connections.
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+
     ],
     "DEFAULT_THROTTLE_RATES": {
-        "anon": "300/min",
-        "user": "3000/min",
+        "anon": "1000/min",
+        "user": "10000/min",
     },
 }
 
@@ -145,7 +144,7 @@ REST_FRAMEWORK = {
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": config("REDIS_URL", default="redis://redis:6379/0"),
+        "LOCATION": config("REDIS_URL", default="redis://localhost:6379/0"),
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
         },
@@ -153,8 +152,8 @@ CACHES = {
 }
 
 # ── Celery — Async Queues (Requirement 3) ─────────────────────────────────────
-CELERY_BROKER_URL = config("REDIS_URL", default="redis://redis:6379/0")
-CELERY_RESULT_BACKEND = config("REDIS_URL", default="redis://redis:6379/0")
+CELERY_BROKER_URL = config("REDIS_URL", default="redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = config("REDIS_URL", default="redis://localhost:6379/0")
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"

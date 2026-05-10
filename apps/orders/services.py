@@ -132,6 +132,14 @@ def create_order_from_cart(user) -> Order:
         "Order #%s created for user=%s total=%s (pessimistic checkout complete)",
         order.id, user.id, total,
     )
+
+    # ── Cache Invalidation (Requirement 6) ────────────────────────────────────
+    # Stock changed → cached product list is now stale. Invalidate it so the
+    # next GET /api/products/ re-reads fresh data from the DB.
+    from django.core.cache import cache
+    cache.delete("product_list")
+    logger.info("Cache invalidated for product list after order #%s", order.id)
+
     return order
 
 

@@ -86,7 +86,7 @@ services:
         echo 'Database started'
 
         echo 'Starting server...'
-         gunicorn --workers=9 --bind=0.0.0.0:8000 config.wsgi:application
+         gunicorn --workers=4 --bind=0.0.0.0:8000 config.wsgi:application
       "
     depends_on:
       migrate:

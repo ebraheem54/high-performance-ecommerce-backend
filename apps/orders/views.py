@@ -65,11 +65,14 @@ def checkout_view(request):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
 
+    # ── Async Processing (Requirement 3) ─────────────────────────────────────
+    # Fire-and-forget: invoice generation runs in a Celery worker.
+    # The HTTP response is returned immediately — the user does NOT wait.
     try:
-        from notifications.tasks import send_order_confirmation_notification
-        send_order_confirmation_notification.delay(order.id, request.user.id)
-    except ImportError:
-        pass
+        from apps.orders.tasks import generate_invoice_task
+        generate_invoice_task.delay(order.id)
+    except Exception:
+        pass   # never block the response if the queue is unavailable
 
     return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
@@ -116,3 +119,4 @@ def update_order_status_view(request, order_id):
     except Order.DoesNotExist:
         return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
     return Response(OrderSerializer(order).data)
+    
