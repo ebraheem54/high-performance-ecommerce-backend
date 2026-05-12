@@ -15,6 +15,7 @@ Synchronization Strategy:
 """
 
 from apps.cart.models import CartItem
+from apps.cart.exceptions import ProductNotFoundError, OutOfStockError
 import logging
 import time
 from django.db import transaction
@@ -54,11 +55,12 @@ def _try_add_to_cart_optimistic(user, product_id: int, quantity: int):
     try:
         product = Product.objects.get(id=product_id, is_active=True)
     except Product.DoesNotExist:
-        raise ValueError(f"Product {product_id} not found or inactive.")
+        raise ProductNotFoundError(f"Product {product_id} not found or is no longer available.")
 
     if product.stock < quantity:
-        raise ValueError(
-            f"Only {product.stock} units of '{product.name}' available."
+        raise OutOfStockError(
+            f"'{product.name}' is out of stock. "
+            f"Only {product.stock} unit(s) remaining."
         )
 
     # ── Attempt optimistic update on existing row ─────────────────────────────
@@ -141,8 +143,8 @@ def add_to_cart(user, product_id: int, quantity: int = 1) -> CartItem:
                 attempt, CART_OPTIMISTIC_MAX_RETRIES, user.id, product_id,
             )
             time.sleep(CART_OPTIMISTIC_RETRY_DELAY * attempt)
-        except ValueError:
-            raise   # not enough stock — no point retrying
+        except (ProductNotFoundError, OutOfStockError):
+            raise   # not found / out of stock — no point retrying
         except IntegrityError:
             # Rare race on INSERT (unique_together) — treat as conflict
             logger.warning(

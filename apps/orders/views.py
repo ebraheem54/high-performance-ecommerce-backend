@@ -66,13 +66,13 @@ def checkout_view(request):
         return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
 
     # ── Async Processing (Requirement 3) ─────────────────────────────────────
-    # Fire-and-forget: invoice generation runs in a Celery worker.
-    # The HTTP response is returned immediately — the user does NOT wait.
+    # Fire-and-forget: confirmation email is sent by Celery AFTER this response.
+    # The HTTP 201 is returned immediately — the user does NOT wait for the email.
     try:
-        from apps.orders.tasks import generate_invoice_task
-        generate_invoice_task.delay(order.id)
+        from apps.orders.tasks import send_order_confirmation_email
+        send_order_confirmation_email.delay(order.id)
     except Exception:
-        pass   # never block the response if the queue is unavailable
+        pass   # never block the response if the queue is temporarily unavailable
 
     return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
@@ -93,12 +93,105 @@ def cancel_order_view(request, order_id):
     except ValueError as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+    # Async cancellation email (Requirement 3) — fire-and-forget
+    try:
+        from apps.orders.tasks import send_order_cancelled_email
+        send_order_cancelled_email.delay(order.id)
+    except Exception:
+        pass
+
     return Response(OrderSerializer(order).data)
 
 
 # ─────────────────────────────────────────────
 # Admin-only endpoints
 # ─────────────────────────────────────────────
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def race_demo_view(request):
+    """
+    POST /api/orders/race-demo/
+    Body: { "product_id": <int> }
+
+    ⚠ DEMO ONLY — Direct Race Condition (NO cart, NO lock, NO stock floor)
+    ════════════════════════════════════════════════════════════════════════
+    Bypasses cart entirely. All users target the same product simultaneously.
+
+    Race window (intentional):
+      1. Read stock from DB  (no SELECT FOR UPDATE)
+      2. Check stock >= 1   (passes for ALL concurrent users if stock=10)
+      3. sleep(0.1)         ← 100ms window — all 50 users pile up HERE
+      4. F('stock') - 1     ← SQL decrement, each transaction commits serially
+      5. stock = 10-50 = -40 ← NEGATIVE → overselling PROVEN
+
+    Compare with /api/orders/checkout/ which uses SELECT FOR UPDATE:
+      → only 10 orders succeed, stock = 0 exactly, never negative.
+    """
+    import time
+    from django.db.models import F
+    from apps.products.models import Product
+
+    if request.user.is_staff:
+        return Response({"error": "Admins cannot place orders."}, status=status.HTTP_403_FORBIDDEN)
+
+    product_id = request.data.get("product_id")
+    if not product_id:
+        return Response({"error": "product_id required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    # ── Step 1: Read stock — NO lock ──────────────────────────────────────────
+    try:
+        product = Product.objects.get(id=product_id, is_active=True)
+    except Product.DoesNotExist:
+        return Response({"error": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    stock_snapshot = product.stock   # snapshot — may already be stale!
+
+    # ── Step 2: NO CHECK — this is the vulnerability! ────────────────────────
+    # A real checkout would check: if stock_snapshot < 1: raise error
+    # Here we SKIP that check to show pure overselling behaviour.
+    # Every single concurrent user proceeds regardless of snapshot value.
+
+    # ── Step 3: Intentional delay — race window ───────────────────────────────
+    # All concurrent users pile up here simultaneously.
+    # None has committed an UPDATE yet — all are sleeping at the same time.
+    time.sleep(0.10)   # 100ms — all concurrent users are simultaneously here
+
+    # ── Step 4: Decrement with SQL F() expression (NO lock) ──────────────────
+    # F('stock') → SQL: UPDATE SET stock = stock - 1
+    # PostgreSQL serialises the UPDATEs at row level, but the CHECK was already
+    # done against a stale snapshot → stock will go NEGATIVE
+    Product.objects.filter(id=product_id).update(stock=F("stock") - 1)
+
+    # Read the ACTUAL stock after decrement (may be negative)
+    actual_stock = Product.objects.get(id=product_id).stock
+
+    from apps.orders.models import Order, OrderItem, Payment
+    order = Order.objects.create(
+        user=request.user,
+        status=Order.Status.CONFIRMED,
+        total_price=product.price,
+    )
+    OrderItem.objects.create(order=order, product_id=product_id, quantity=1, unit_price=product.price)
+    Payment.objects.create(order=order, amount=product.price, method=Payment.Method.CREDIT_CARD)
+
+    import logging
+    logging.getLogger(__name__).warning(
+        "[RACE-DEMO] ⚠ Order #%s created for user=%s | "
+        "snapshot_stock=%s | actual_stock_now=%s %s",
+        order.id, request.user.id, stock_snapshot, actual_stock,
+        "← OVERSELL!" if actual_stock < 0 else "",
+    )
+
+    return Response({
+        "order_id"      : order.id,
+        "product_id"    : product_id,
+        "snapshot_stock": stock_snapshot,
+        "actual_stock"  : actual_stock,
+        "oversell"      : actual_stock < 0,
+        "warning"       : "⚠ NO LOCKING — race condition demo endpoint",
+    }, status=status.HTTP_201_CREATED)
+
+
 @api_view(["PATCH"])
 @permission_classes([IsAdminUser])
 def update_order_status_view(request, order_id):

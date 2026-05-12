@@ -14,7 +14,7 @@ class Product(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
-    stock = models.PositiveIntegerField(default=0)
+    stock = models.IntegerField(default=0)
 
     # version field for Optimistic Locking — incremented on every stock update
     version = models.PositiveIntegerField(default=0)

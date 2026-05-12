@@ -25,10 +25,21 @@ class RegisterView(generics.CreateAPIView):
     """
     POST /api/users/register/
     Open to everyone — no auth required.
+    Creates the user and immediately returns 201.
+    Welcome email is sent asynchronously by Celery (Requirement 3).
     """
-    serializer_class     = UserSerializer
-    permission_classes   = []
+    serializer_class       = UserSerializer
+    permission_classes     = []
     authentication_classes = []
+
+    def perform_create(self, serializer):
+        user = serializer.save()
+        # Async (Requirement 3) — fire-and-forget welcome email
+        try:
+            from apps.users.tasks import send_welcome_email
+            send_welcome_email.delay(user.id)
+        except Exception:
+            pass  # never block registration if the queue is unavailable
 
 
 class LoginView(ObtainAuthToken):

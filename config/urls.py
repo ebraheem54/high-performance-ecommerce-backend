@@ -18,6 +18,7 @@ urlpatterns = [
     path("api/products/", include("apps.products.urls", namespace="products")),
     path("api/orders/", include("apps.orders.urls", namespace="orders")),
     path("api/cart/", include("apps.cart.urls", namespace="cart")),
+    path("api/core/", include("apps.core.urls", namespace="core")),
     # Uncomment after creating notifications and reports apps locally:
     # path("api/notifications/", include("notifications.urls", namespace="notifications")),
     # path("api/reports/", include("reports.urls", namespace="reports")),

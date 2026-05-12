@@ -11,6 +11,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.cart import services
+from apps.cart.exceptions import ProductNotFoundError, OutOfStockError
 from apps.cart.serializers import CartItemSerializer, AddToCartSerializer
 
 
@@ -51,6 +52,10 @@ def add_to_cart_view(request):
             serializer.validated_data["product_id"],
             serializer.validated_data["quantity"],
         )
+    except ProductNotFoundError as e:
+        return Response({"error": str(e)}, status=status.HTTP_404_NOT_FOUND)
+    except OutOfStockError as e:
+        return Response({"error": str(e)}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     return Response(CartItemSerializer(item).data, status=status.HTTP_201_CREATED)
