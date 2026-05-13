@@ -13,8 +13,12 @@ urlpatterns = [
     path("<int:pk>/",                 views.MyOrderDetailView.as_view(),  name="order-detail"),
     path("checkout/",                 views.checkout_view,                name="checkout"),
     path("<int:order_id>/cancel/",    views.cancel_order_view,            name="order-cancel"),
-      # Direct endpoint: no cart, no stock floor, 100ms sleep → stock goes negative
+    # Req 1 demo: no cart, no lock, 100ms sleep → stock goes negative
     path("race-demo/",                views.race_demo_view,               name="race-demo"),
     # Admin only
     path("<int:order_id>/status/",    views.update_order_status_view,     name="order-status"),
+
+    # ── DEMO ONLY — safe to remove after report ───────────────────────────────
+    # Req 3: synchronous email simulation — compare response time with checkout/
+    path("checkout-sync/",            views.checkout_sync_demo_view,      name="checkout-sync"),
 ]

@@ -34,4 +34,4 @@ RUN python -m venv /py && \
 ENV PATH="/py/bin:$PATH"
 COPY . /app
 USER django-user
-CMD ["gunicorn", "--workers=4", "--bind=0.0.0.0:8000", "config.wsgi:application"]
+CMD ["gunicorn", "--workers=2", "--bind=0.0.0.0:8000", "config.wsgi:application"]

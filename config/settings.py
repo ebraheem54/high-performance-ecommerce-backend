@@ -8,6 +8,7 @@ import sys
 
 from pathlib import Path
 from decouple import config
+import dj_database_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 # Add apps/ to Python path so apps can be imported as bare modules
@@ -79,23 +80,23 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 # ── Database (PostgreSQL) ─────────────────────────────────────────────────────
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": config("DB_NAME", default="ecommerce_db"),
-        "USER": config("DB_USER", default="postgres"),
-        "PASSWORD": config("DB_PASSWORD", default="postgres"),
-        "HOST": config("DB_HOST", default="db"),
-        "PORT": config("DB_PORT", default="5432"),
+_DATABASE_URL = os.environ.get("DATABASE_URL")
+if _DATABASE_URL:
+    DATABASES = {"default": dj_database_url.parse(_DATABASE_URL)}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": config("DB_NAME", default="ecommerce_db"),
+            "USER": config("DB_USER", default="postgres"),
+            "PASSWORD": config("DB_PASSWORD", default="postgres"),
+            "HOST": config("DB_HOST", default="localhost"),
+            "PORT": config("DB_PORT", default="5432"),
+        }
     }
-}
 
 
 # ── DB Connection Pooling — Resource Management (Requirement 2) ───────────────
-# CONN_MAX_AGE reuses open DB connections across requests instead of
-# opening a new TCP connection for every request.
-# 60 s = connections survive for 1 minute of idle time before being closed.
-# This dramatically reduces connection overhead under high concurrency.
 DATABASES["default"]["CONN_MAX_AGE"] = config("CONN_MAX_AGE", default=60, cast=int)
 
 
@@ -184,6 +185,39 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
+# ── Celery Queue Routing — Async Queues (Requirement 3) ──────────────────────
+# Separates tasks into dedicated queues so a flood of email tasks cannot block
+# the batch processing queue.
+#
+# Run workers (after-solution setup):
+#   Email worker:  celery -A config worker -Q emails   --loglevel=info -c 4
+#   Batch worker:  celery -A config worker -Q batch    --loglevel=info -c 2
+#   Default worker:celery -A config worker -Q celery   --loglevel=info -c 4
+#
+# Single worker (all queues together — before-solution comparison):
+#   celery -A config worker -Q emails,batch,celery --loglevel=info
+#
+# To REMOVE: delete this entire block (CELERY_TASK_QUEUES + CELERY_TASK_ROUTES).
+from kombu import Queue as _Queue
+
+CELERY_TASK_QUEUES = (
+    _Queue("emails"),    # Email notification tasks (Req 3)
+    _Queue("batch"),     # Batch processing tasks   (Req 4)
+    _Queue("celery"),    # General / default tasks
+)
+
+CELERY_TASK_ROUTES = {
+    # ── Email tasks → emails queue ─────────────────────────────────────────────
+    "apps.orders.tasks.send_order_confirmation_email": {"queue": "emails"},
+    "apps.orders.tasks.send_order_cancelled_email":    {"queue": "emails"},
+    # ── Batch tasks → batch queue ──────────────────────────────────────────────
+    "apps.core.tasks.run_daily_sales_batch_task":      {"queue": "batch"},
+    "apps.cart.tasks.cleanup_abandoned_carts":          {"queue": "batch"},
+    # ── General tasks → default celery queue ──────────────────────────────────
+    "apps.products.tasks.release_expired_locks_task":  {"queue": "celery"},
+    "apps.products.tasks.invalidate_product_cache":    {"queue": "celery"},
+}
+
 # ── CORS ──────────────────────────────────────────────────────────────────────
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 
@@ -196,12 +230,17 @@ SPECTACULAR_SETTINGS = {
 
 
 
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+_email_host = os.getenv("EMAIL_HOST")
+_email_port = os.getenv("EMAIL_PORT")
 
-EMAIL_HOST = os.getenv("EMAIL_HOST")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT"))
+if _email_host and _email_port:
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    EMAIL_HOST = _email_host
+    EMAIL_PORT = int(_email_port)
+    EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+    EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+    EMAIL_USE_TLS = True
+else:
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
-EMAIL_USE_TLS    = True
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@ecommerce.dev")

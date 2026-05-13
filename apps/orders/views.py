@@ -192,6 +192,92 @@ def race_demo_view(request):
     }, status=status.HTTP_201_CREATED)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ⚠ DEMO ONLY — Synchronous Checkout (Requirement 3 — BEFORE solution)
+# ══════════════════════════════════════════════════════════════════════════════
+# Purpose:
+#   Simulate the before-solution version where email sending happens
+#   SYNCHRONOUSLY inside the HTTP request — the user must wait for the
+#   full email delay before receiving a response.
+#
+# Behavior:
+#   1. Creates the order using the same production service (create_order_from_cart)
+#   2. Simulates synchronous email sending with time.sleep(2) + a log message
+#   3. Returns total elapsed time in the response body for easy comparison
+#
+# Does NOT modify checkout_view in any way.
+# Does NOT send a real email (uses console backend / sleep simulation only).
+#
+# Compare:
+#   POST /api/orders/checkout-sync/  ← this demo: response after ~2s+
+#   POST /api/orders/checkout/       ← real solution: response in <300ms
+#
+# To REMOVE: delete this function + its URL pattern in urls.py.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def checkout_sync_demo_view(request):
+    """
+    POST /api/orders/checkout-sync/
+
+    ⚠ DEMO ONLY — Simulates synchronous email in the checkout path.
+    The user waits for the full email delay before getting a response.
+    """
+    import time as _time
+
+    if request.user.is_staff:
+        return Response(
+            {"error": "Admins cannot place orders."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    started = _time.time()
+
+    # ── Step 1: Create order (same production service, unchanged) ─────────────
+    try:
+        order = services.create_order_from_cart(request.user)
+    except ValueError as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
+
+    order_elapsed = round(_time.time() - started, 3)
+
+    # ── Step 2: ⚠ Synchronous "email sending" — blocks the HTTP response ──────
+    # In the before-solution, send_mail() is called directly here.
+    # If email takes 2 seconds, the user waits 2 extra seconds.
+    # If email fails, the user gets an error even though the order succeeded.
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    _log.warning(
+        "[SYNC-EMAIL] ⚠ DEMO — Sending confirmation email SYNCHRONOUSLY "
+        "for Order #%s — blocking HTTP response for 2s ...",
+        order.id,
+    )
+
+    _time.sleep(2)   # ← simulates real SMTP latency (2 seconds)
+
+    _log.warning(
+        "[SYNC-EMAIL] ⚠ DEMO — Email 'sent' synchronously for Order #%s "
+        "(user waited the full delay before receiving HTTP 201)",
+        order.id,
+    )
+
+    total_elapsed = round(_time.time() - started, 3)
+
+    # ── Step 3: Return response — only after email is "done" ─────────────────
+    data = OrderSerializer(order).data
+    data["_demo"] = {
+        "warning"        : "⚠ DEMO ONLY — synchronous email simulation",
+        "order_time_s"   : order_elapsed,
+        "email_delay_s"  : 2.0,
+        "total_elapsed_s": total_elapsed,
+        "compare_with"   : "POST /api/orders/checkout/ (async Celery — returns in <300ms)",
+    }
+    return Response(data, status=status.HTTP_201_CREATED)
+
+
 @api_view(["PATCH"])
 @permission_classes([IsAdminUser])
 def update_order_status_view(request, order_id):

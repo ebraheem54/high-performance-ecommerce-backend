@@ -153,6 +153,18 @@ services:
     networks:
       - ecommerce-network
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # REQUIREMENT 3: Async Queues — Dedicated Celery Workers per Queue
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Three isolated workers so tasks routed to emails/batch/celery queues are
+  # always consumed. A single worker listening to all queues allows a flood of
+  # email tasks to starve batch jobs, or vice-versa.
+  #
+  # Queue routing is defined in config/settings.py (CELERY_TASK_ROUTES).
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Worker 1 — Default / General tasks (queue: celery)
+  # concurrency=2: moderate — handles misc tasks like cache invalidation
   celery_worker:
     build:
       context: .
@@ -166,14 +178,69 @@ services:
       - .env
     command: >
       sh -c "
-        echo 'Waiting for database at ${DB_HOST}:${DB_PORT}...'
+        echo '[DEFAULT-WORKER] Waiting for database at ${DB_HOST}:${DB_PORT}...'
         until nc -z ${DB_HOST} ${DB_PORT}; do
           sleep 0.5
         done
-        echo 'Database started'
+        echo '[DEFAULT-WORKER] Starting — queue=celery, concurrency=2'
+        celery -A config worker -l info --concurrency=2 -Q celery -n default_worker@%h
+      "
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - ecommerce-network
 
-        echo 'Starting Celery worker...'
-        celery -A config worker -l info --concurrency=4
+  # Worker 2 — Email tasks (queue: emails)
+  # concurrency=4: I/O-bound (SMTP waits), higher concurrency is safe and fast
+  celery_email_worker:
+    build:
+      context: .
+      args:
+        DEV: "true"
+    container_name: ecommerce_celery_email_worker
+    restart: unless-stopped
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    command: >
+      sh -c "
+        echo '[EMAIL-WORKER] Waiting for database at ${DB_HOST}:${DB_PORT}...'
+        until nc -z ${DB_HOST} ${DB_PORT}; do
+          sleep 0.5
+        done
+        echo '[EMAIL-WORKER] Starting — queue=emails, concurrency=4'
+        celery -A config worker -l info --concurrency=4 -Q emails -n email_worker@%h
+      "
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - ecommerce-network
+
+  # Worker 3 — Batch processing tasks (queue: batch)
+  # concurrency=1: DB-heavy — running multiple batch jobs simultaneously
+  # would put excessive pressure on PostgreSQL (multiple full-table scans)
+  celery_batch_worker:
+    build:
+      context: .
+      args:
+        DEV: "true"
+    container_name: ecommerce_celery_batch_worker
+    restart: unless-stopped
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    command: >
+      sh -c "
+        echo '[BATCH-WORKER] Waiting for database at ${DB_HOST}:${DB_PORT}...'
+        until nc -z ${DB_HOST} ${DB_PORT}; do
+          sleep 0.5
+        done
+        echo '[BATCH-WORKER] Starting — queue=batch, concurrency=1'
+        celery -A config worker -l info --concurrency=1 -Q batch -n batch_worker@%h
       "
     depends_on:
       migrate:
