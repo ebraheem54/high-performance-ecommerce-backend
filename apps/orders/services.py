@@ -4,6 +4,7 @@ Handles checkout as a single ACID transaction:
   payment + stock deduction + order creation all succeed or all fail.
 """
 import logging
+import time
 from django.db import transaction
 from django.utils import timezone
 from apps.orders.models import Order, OrderItem, Payment
@@ -180,6 +181,139 @@ def process_payment(order_id: int, method: str, transaction_id: str = "") -> Pay
     logger.info("Payment completed for order=%s method=%s", order_id, method)
     return payment
 
+
+
+@transaction.atomic
+def checkout_with_wallet(user) -> Order:
+    """
+    ═══ WALLET PAYMENT CHECKOUT — Requirement 3 (Payment Simulation) ═══════════
+    تدفق كامل: فحص الرصيد → خصم → إنشاء الطلب → محاكاة بوابة الدفع
+
+    Synchronization Points:
+      Point 1 — User row locked with select_for_update():
+        → يمنع race condition على الـ wallet إذا فتح المستخدم أكثر من tab
+        → أي transaction أخرى تحاول تعديل نفس المستخدم ستنتظر
+
+      Point 2 — Product rows locked (pessimistic — نفس create_order_from_cart):
+        → يمنع overselling
+
+      Point 3 — time.sleep(3) يحاكي بوابة دفع حقيقية:
+        BEFORE solution: هذا الـ sleep داخل HTTP request → المستخدم ينتظر 3s+
+        AFTER  solution: نستدعي هذه الدالة من Celery task → المستخدم يحصل الـ response فوراً
+
+    الفرق الجوهري مقارنة بـ create_order_from_cart:
+      → يتحقق من wallet_balance قبل الشراء
+      → يخصم wallet_balance بشكل atomic
+      → يضيف sleep(3) لمحاكاة بوابة الدفع الخارجية
+    """
+    from apps.cart.models import CartItem
+    from apps.products.models import Product
+    from apps.products.services import deduct_stock_pessimistic
+
+    # ── Synchronization Point 1: قفل صف المستخدم لحماية الـ wallet ─────────────
+    from apps.users.models import User as UserModel
+    locked_user = UserModel.objects.select_for_update().get(pk=user.pk)
+
+    cart_items = list(
+        CartItem.objects
+        .select_related("product")
+        .filter(user=locked_user)
+    )
+    if not cart_items:
+        raise ValueError("السلة فارغة.")
+
+    product_ids = sorted(item.product_id for item in cart_items)
+
+    # ── Synchronization Point 2: قفل صفوف المنتجات (نفس النهج الـ pessimistic) ─
+    locked_products = {
+        p.id: p
+        for p in Product.objects.select_for_update().filter(id__in=product_ids).order_by("id")
+    }
+
+    for item in cart_items:
+        locked_product = locked_products.get(item.product_id)
+        if not locked_product:
+            raise ValueError(f"المنتج '{item.product.name}' غير متوفر.")
+        if locked_product.stock < item.quantity:
+            raise ValueError(
+                f"المخزون غير كافٍ لـ '{locked_product.name}': "
+                f"المتوفر {locked_product.stock}، المطلوب {item.quantity}."
+            )
+
+    total = sum(
+        locked_products[item.product_id].price * item.quantity
+        for item in cart_items
+    )
+
+    # ── فحص رصيد المحفظة ────────────────────────────────────────────────────────
+    if locked_user.wallet_balance < total:
+        raise ValueError(
+            f"رصيد المحفظة غير كافٍ: "
+            f"الرصيد الحالي {locked_user.wallet_balance:.2f}، "
+            f"إجمالي الطلب {total:.2f}."
+        )
+
+    # ── Synchronization Point 3: محاكاة بوابة الدفع الخارجية ──────────────────
+    # في الواقع: HTTPS call لـ Stripe/PayPal يستغرق 2-4 ثواني
+    # هنا: sleep(3) لمحاكاة هذا التأخير
+    # BEFORE solution: هذا الـ sleep يحجب HTTP response
+    # AFTER  solution: يُنفَّذ داخل Celery task — المستخدم لا ينتظر
+    logger.info(
+        "[WALLET-PAYMENT] 💳 بدء معالجة الدفع للمستخدم=%s المبلغ=%s ...",
+        locked_user.id, total,
+    )
+    time.sleep(3)   # ← محاكاة بوابة دفع خارجية (Stripe/PayPal latency)
+    logger.info(
+        "[WALLET-PAYMENT] ✅ تم الدفع للمستخدم=%s المبلغ=%s",
+        locked_user.id, total,
+    )
+
+    # ── خصم الرصيد من المحفظة ──────────────────────────────────────────────────
+    locked_user.wallet_balance -= total
+    locked_user.save(update_fields=["wallet_balance", "updated_at"])
+
+    # ── خصم المخزون ────────────────────────────────────────────────────────────
+    for item in cart_items:
+        deduct_stock_pessimistic(locked_products[item.product_id], item.quantity)
+
+    # ── إنشاء الطلب ────────────────────────────────────────────────────────────
+    order = Order.objects.create(
+        user=locked_user,
+        status=Order.Status.PENDING,
+        total_price=total,
+    )
+    OrderItem.objects.bulk_create([
+        OrderItem(
+            order=order,
+            product_id=item.product_id,
+            quantity=item.quantity,
+            unit_price=locked_products[item.product_id].price,
+        )
+        for item in cart_items
+    ])
+    order.status = Order.Status.CONFIRMED
+    order.save(update_fields=["status", "updated_at"])
+
+    # ── تسجيل الدفع ────────────────────────────────────────────────────────────
+    Payment.objects.create(
+        order=order,
+        amount=total,
+        method=Payment.Method.WALLET,
+        status=Payment.Status.COMPLETED,
+    )
+
+    # ── مسح السلة ──────────────────────────────────────────────────────────────
+    CartItem.objects.filter(user=locked_user).delete()
+
+    # ── إبطال الـ cache ─────────────────────────────────────────────────────────
+    from django.core.cache import cache
+    cache.delete("product_list")
+
+    logger.info(
+        "Order #%s created for user=%s total=%s wallet_remaining=%s (wallet checkout)",
+        order.id, locked_user.id, total, locked_user.wallet_balance,
+    )
+    return order
 
 
 def get_user_orders(user):

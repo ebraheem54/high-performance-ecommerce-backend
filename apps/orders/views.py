@@ -77,6 +77,99 @@ def checkout_view(request):
     return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Wallet Payment Endpoints — Requirement 3 (Payment Simulation)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def wallet_balance_view(request):
+    """
+    GET /api/orders/wallet/balance/
+    إرجاع رصيد المحفظة الحالي للمستخدم.
+    """
+    return Response({
+        "wallet_balance": float(request.user.wallet_balance),
+        "currency": "USD",
+        "user": request.user.email,
+    })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def checkout_wallet_sync_view(request):
+    """
+    POST /api/orders/checkout-wallet-sync/
+
+    ⚠ BEFORE SOLUTION — Req 3 Payment Demo:
+    الدفع من المحفظة يحدث SYNCHRONOUSLY داخل HTTP request.
+    المستخدم ينتظر 3 ثواني (محاكاة بوابة الدفع) قبل أن يحصل على الـ response.
+
+    تدفق كامل: فحص الرصيد → payment gateway sleep(3s) → خصم → إنشاء الطلب
+    Compare with: POST /api/orders/checkout-wallet-async/ ← returns in <300ms
+    """
+    import time as _time
+
+    if request.user.is_staff:
+        return Response({"error": "Admins cannot place orders."}, status=status.HTTP_403_FORBIDDEN)
+
+    started = _time.time()
+    try:
+        order = services.checkout_with_wallet(request.user)
+    except ValueError as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
+
+    total_elapsed = round(_time.time() - started, 3)
+
+    data = OrderSerializer(order).data
+    data["_demo"] = {
+        "mode"           : "BEFORE — synchronous payment",
+        "warning"        : "⚠ HTTP response blocked for ~3s (payment gateway simulation)",
+        "total_elapsed_s": total_elapsed,
+        "compare_with"   : "POST /api/orders/checkout-wallet-async/ (async — returns in <300ms)",
+        "wallet_balance" : float(request.user.wallet_balance),
+    }
+    return Response(data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def checkout_wallet_async_view(request):
+    """
+    POST /api/orders/checkout-wallet-async/
+
+    ✅ AFTER SOLUTION — Req 3 Payment Demo:
+    الدفع من المحفظة يحدث عبر Celery task في الخلفية.
+    المستخدم يحصل على HTTP 202 فوراً — Celery يكمل فحص الرصيد والخصم لاحقاً.
+
+    الفرق الجوهري:
+      BEFORE: checkout_wallet_sync → HTTP يحجب 3s
+      AFTER : checkout_wallet_async → HTTP يرجع <300ms، Celery يعمل 3s في الخلفية
+    """
+    if request.user.is_staff:
+        return Response({"error": "Admins cannot place orders."}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        from apps.orders.tasks import process_wallet_payment_async
+        task = process_wallet_payment_async.delay(request.user.id)
+    except Exception as e:
+        return Response({"error": f"Queue unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    return Response({
+        "status"     : "queued",
+        "task_id"    : task.id,
+        "message"    : "✅ طلبك في قائمة الانتظار — سيتم معالجة الدفع في الخلفية",
+        "wallet_balance": float(request.user.wallet_balance),
+        "_demo"      : {
+            "mode"      : "AFTER — async payment via Celery",
+            "note"      : "Payment gateway sleep(3s) runs in background — HTTP returned immediately",
+            "check_task": f"GET /api/orders/ (after a few seconds to see completed order)",
+        },
+    }, status=status.HTTP_202_ACCEPTED)
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def cancel_order_view(request, order_id):

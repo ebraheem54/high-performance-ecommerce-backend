@@ -144,7 +144,12 @@ class Command(BaseCommand):
             )
             if created:
                 user.set_password(LOCUST_PASSWORD)
+                user.wallet_balance = 500.00
                 user.save()
+            else:
+                if user.wallet_balance < 100:
+                    user.wallet_balance = 500.00
+                    user.save(update_fields=["wallet_balance"])
             users.append(user)
 
         self.stdout.write(self.style.SUCCESS(

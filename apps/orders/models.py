@@ -94,6 +94,7 @@ class Payment(models.Model):
         CREDIT_CARD = "CREDIT_CARD", "Credit Card"
         DEBIT_CARD = "DEBIT_CARD", "Debit Card"
         CASH = "CASH", "Cash on Delivery"
+        WALLET = "WALLET", "Wallet Balance"
 
     order = models.OneToOneField(
         Order,

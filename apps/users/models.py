@@ -1,4 +1,4 @@
- 
+
 # Create your models here.
 """
 Database models for users app.
@@ -43,6 +43,13 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    wallet_balance = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=500.00,
+        help_text="رصيد المحفظة — يُستخدم لمحاكاة الدفع (  Payment Simulation)",
+    )
 
     objects = UserManager()
 
