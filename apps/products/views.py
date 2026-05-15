@@ -5,14 +5,20 @@ Permissions:
   - Admin    (is_staff=True) : full CRUD + restock + inventory logs
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 from django.core.cache import cache
-from rest_framework import generics, status
+from django.db.models import QuerySet
+from rest_framework import generics
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import BasePermission
 from rest_framework.permissions import (
     IsAuthenticated,
     IsAdminUser,
-    IsAuthenticatedOrReadOnly,
 )
+from rest_framework.request import Request
 from rest_framework.response import Response
 
 from apps.products import services
@@ -36,25 +42,34 @@ class ProductListView(generics.ListCreateAPIView):
 
     serializer_class = ProductSerializer
 
-    def get_permissions(self):
+    def get_permissions(self) -> list[BasePermission]:
         if self.request.method == "POST":
             return [IsAdminUser()]  # only admin can create
         return [IsAuthenticated()]  # customers can list
 
-    def get_queryset(self):
+    def get_queryset(self) -> QuerySet[Product]:
         return services.get_active_products()
 
-    def list(self, request, *args, **kwargs):
-        """Return cached product list if available (Redis cache)."""
+    def list(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        """Return the product list from Redis when available."""
         cached = cache.get(PRODUCT_LIST_CACHE_KEY)
-        if cached:
+        if cached is not None:
             return Response(cached)
 
-        response = super().list(request, *args, **kwargs)
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+        else:
+            serializer = self.get_serializer(queryset, many=True)
+            response = Response(serializer.data)
+
         cache.set(PRODUCT_LIST_CACHE_KEY, response.data, PRODUCT_LIST_CACHE_TTL)
         return response
 
-    def perform_create(self, serializer):
+    def perform_create(self, serializer: Any) -> None:
         serializer.save()
         cache.delete(PRODUCT_LIST_CACHE_KEY)
 
@@ -68,24 +83,24 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     queryset = Product.objects.filter(is_active=True)
 
-    def get_permissions(self):
+    def get_permissions(self) -> list[BasePermission]:
         if self.request.method in ("PATCH", "PUT", "DELETE"):
             return [IsAdminUser()]
         return [IsAuthenticated()]
 
-    def get_serializer_class(self):
+    def get_serializer_class(self) -> type[ProductSerializer]:
         if self.request.user and self.request.user.is_staff:
             return ProductDetailSerializer  # admin sees version + updated_at
         return ProductSerializer  # customer sees basic info
 
-    def perform_update(self, serializer):
+    def perform_update(self, serializer: Any) -> None:
         serializer.save()
         cache.delete(PRODUCT_LIST_CACHE_KEY)
 
 
 @api_view(["POST"])
 @permission_classes([IsAdminUser])
-def restock_view(request, product_id):
+def restock_view(request: Request, product_id: int) -> Response:
     """
     POST /api/products/<id>/restock/       — admin only
     Body: { "quantity": 50, "note": "New shipment" }
@@ -108,10 +123,10 @@ class ProductReviewListView(generics.ListCreateAPIView):
     serializer_class = ReviewSerializer
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
+    def get_queryset(self) -> QuerySet[Review]:
         return Review.objects.filter(product_id=self.kwargs["product_id"])
 
-    def perform_create(self, serializer):
+    def perform_create(self, serializer: Any) -> None:
         serializer.save(
             user=self.request.user,
             product_id=self.kwargs["product_id"],
@@ -126,7 +141,7 @@ class InventoryLogListView(generics.ListAPIView):
     permission_classes = [IsAdminUser]
 
 
-    def get_queryset(self):
+    def get_queryset(self) -> QuerySet[Any]:
         return services.get_product_by_id(
             self.kwargs["product_id"]
         ).inventory_logs.all()

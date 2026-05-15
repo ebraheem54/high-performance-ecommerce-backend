@@ -16,6 +16,8 @@ WHY THIS VERSION?
     LOCUST_MODE=race_before
     LOCUST_MODE=req3_sync
     LOCUST_MODE=req3_async
+    LOCUST_MODE=req4_before
+    LOCUST_MODE=req4_after
 
 DEFAULT MODE:
   req2
@@ -66,7 +68,31 @@ MODE TABLE:
   │ race_before                  │ RaceConditionDemoUser│ Req 1 before-solution race demo             │
   │ req3_sync                    │ CheckoutSyncUser     │ Req 3 before: synchronous checkout/email    │
   │ req3_async                   │ CheckoutAsyncUser    │ Req 3 after: async Celery checkout/email    │
+  │ req4_before                  │ BatchNaiveUser       │ Req 4 before: naive batch (no chunking)     │
+  │ req4_after                   │ BatchChunkedUser     │ Req 4 after: chunked batch (CHUNK_SIZE=50)  │
   └──────────────────────────────┴──────────────────────┴─────────────────────────────────────────────┘
+
+REQ 4 BEFORE/AFTER:
+  STEP 1 — Seed orders first (normal mode, 2 min):
+    LOCUST_MODE=normal docker compose run --rm locust \
+      -f locustfile.py --host http://nginx:80 \
+      --users 30 --spawn-rate 5 --headless --run-time 120s
+
+  STEP 2 — Run BEFORE (naive, no chunking):
+    LOCUST_MODE=req4_before ADMIN_TOKEN=<token> docker compose run --rm \
+      -e LOCUST_MODE=req4_before -e ADMIN_TOKEN=<token> locust \
+      -f locustfile.py --host http://nginx:80 \
+      --users 1 --spawn-rate 1 --headless --run-time 30s
+    Watch: docker logs ecommerce_celery_batch_worker --follow
+    Look for: [BATCH-NAIVE] Loaded ALL X orders into memory at once
+
+  STEP 3 — Run AFTER (chunked):
+    LOCUST_MODE=req4_after ADMIN_TOKEN=<token> docker compose run --rm \
+      -e LOCUST_MODE=req4_after -e ADMIN_TOKEN=<token> locust \
+      -f locustfile.py --host http://nginx:80 \
+      --users 1 --spawn-rate 1 --headless --run-time 30s
+    Watch: docker logs ecommerce_celery_batch_worker --follow
+    Look for: [BATCH] Chunk 1/N processed ...
 """
 
 import os
@@ -88,6 +114,8 @@ VALID_MODES = {
     "race_before",
     "req3_sync",
     "req3_async",
+    "req4_before",
+    "req4_after",
 }
 
 if LOCUST_MODE not in VALID_MODES:
@@ -137,6 +165,11 @@ req6_first_hit_times: list = []
 req6_cache_hit_times: list = []
 
 req4_triggered = False
+
+req4_naive_times_ms: list = []
+req4_chunked_times_ms: list = []
+req4_naive_count = 0
+req4_chunked_count = 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -318,10 +351,23 @@ def on_test_stop(environment, **kwargs):
         if avg_a > 0:
             print(f"  Speedup: {avg_s / avg_a:.1f}x faster with async ✅")
 
-    print("\nREQ 4 — Batch Processing")
+    print("\nREQ 4 — Batch Processing (BEFORE vs AFTER)")
     if req4_triggered:
-        print("  ✅ run_daily_sales_batch_task triggered")
+        print("  ✅ run_daily_sales_batch_task triggered (auto)")
         print("  ℹ Check Celery logs: [BATCH] Chunk X/Y processed...")
+
+    if req4_naive_times_ms:
+        avg_n = sum(req4_naive_times_ms) / len(req4_naive_times_ms)
+        print(f"  BEFORE (naive — no chunking) : triggers={req4_naive_count}  avg_trigger_ms={avg_n:.0f}ms")
+        print(f"  ⚠ Watch Celery logs for: [BATCH-NAIVE] Loaded ALL X orders into memory at once")
+
+    if req4_chunked_times_ms:
+        avg_c = sum(req4_chunked_times_ms) / len(req4_chunked_times_ms)
+        print(f"  AFTER  (chunked — CHUNK_SIZE=50) : triggers={req4_chunked_count}  avg_trigger_ms={avg_c:.0f}ms")
+        print(f"  ✅ Watch Celery logs for: [BATCH] Chunk 1/N processed...")
+
+    if not req4_naive_times_ms and not req4_chunked_times_ms and not req4_triggered:
+        print("  ℹ Run with LOCUST_MODE=req4_before or req4_after to test batch processing")
 
     print("\nREQ 6 — Distributed Caching")
     if req6_first_hit_times and req6_cache_hit_times:
@@ -359,6 +405,7 @@ def _incr(name: str, delta: int = 1):
 
 
 def _record(name: str, value: float):
+    global req4_naive_count, req4_chunked_count
     with _lock:
         if name == "req3_sync":
             req3_sync_times.append(value)
@@ -372,6 +419,12 @@ def _record(name: str, value: float):
             req2_capacity_times_ms.append(value)
         elif name == "req2_db_conn":
             req2_db_connections.append(value)
+        elif name == "req4_naive_ms":
+            req4_naive_times_ms.append(value)
+            req4_naive_count += 1
+        elif name == "req4_chunked_ms":
+            req4_chunked_times_ms.append(value)
+            req4_chunked_count += 1
 
 
 def _login(client, email: str, password: str, name_suffix: str = "") -> str | None:
@@ -822,6 +875,100 @@ class CheckoutAsyncUser(HttpUser):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CLASS 7 — BatchNaiveUser  (REQ 4 — BEFORE: no chunking)
+# ══════════════════════════════════════════════════════════════════════════════
+# Triggers the naive batch endpoint repeatedly so the doctor can see in
+# Celery logs: [BATCH-NAIVE] Loaded ALL X orders into memory at once
+# Use --users 1  (a single admin is enough — batch is heavy, not concurrent)
+
+class BatchNaiveUser(HttpUser):
+    weight = 0
+    wait_time = between(8.0, 12.0)
+
+    def on_start(self):
+        if ADMIN_TOKEN:
+            self.token = ADMIN_TOKEN
+            print("  ✓ BatchNaiveUser using ADMIN_TOKEN")
+            return
+        self.token = _login(self.client, ADMIN_EMAIL, ADMIN_PASSWORD, "[batch-naive]")
+        if not self.token:
+            print("  [WARN] Admin login failed — BatchNaiveUser idle")
+
+    @task
+    def trigger_naive_batch(self):
+        if not self.token:
+            return
+
+        t = time.time()
+        with self.client.post(
+            "/api/core/trigger-batch-naive/",
+            json={"days_back": 7},
+            headers={"Authorization": f"Token {self.token}"},
+            name="POST /api/core/trigger-batch-naive/ [REQ4 BEFORE — NO CHUNKS]",
+            catch_response=True,
+        ) as resp:
+            ms = (time.time() - t) * 1000
+            if resp.status_code in (200, 202):
+                _record("req4_naive_ms", ms)
+                resp.success()
+                print(
+                    f"  [REQ4-BEFORE] Naive batch queued in {ms:.0f}ms — "
+                    "watch Celery logs for [BATCH-NAIVE] Loaded ALL X orders"
+                )
+            elif resp.status_code == 403:
+                resp.failure("Admin auth required — set ADMIN_TOKEN env var")
+            else:
+                resp.failure(f"Naive batch trigger failed: {resp.status_code} {resp.text[:120]}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLASS 8 — BatchChunkedUser  (REQ 4 — AFTER: chunked CHUNK_SIZE=50)
+# ══════════════════════════════════════════════════════════════════════════════
+# Triggers the chunked batch endpoint repeatedly so the doctor can see in
+# Celery logs: [BATCH] Chunk 1/N processed ...  [BATCH] Chunk 2/N processed ...
+# chunk_size=10 used so chunks appear clearly even with few orders.
+
+class BatchChunkedUser(HttpUser):
+    weight = 0
+    wait_time = between(8.0, 12.0)
+
+    def on_start(self):
+        if ADMIN_TOKEN:
+            self.token = ADMIN_TOKEN
+            print("  ✓ BatchChunkedUser using ADMIN_TOKEN")
+            return
+        self.token = _login(self.client, ADMIN_EMAIL, ADMIN_PASSWORD, "[batch-chunked]")
+        if not self.token:
+            print("  [WARN] Admin login failed — BatchChunkedUser idle")
+
+    @task
+    def trigger_chunked_batch(self):
+        if not self.token:
+            return
+
+        t = time.time()
+        with self.client.post(
+            "/api/core/trigger-batch/",
+            json={"chunk_size": 10},
+            headers={"Authorization": f"Token {self.token}"},
+            name="POST /api/core/trigger-batch/ [REQ4 AFTER — CHUNKED]",
+            catch_response=True,
+        ) as resp:
+            ms = (time.time() - t) * 1000
+            if resp.status_code in (200, 202):
+                _record("req4_chunked_ms", ms)
+                resp.success()
+                print(
+                    f"  [REQ4-AFTER] Chunked batch queued in {ms:.0f}ms — "
+                    "watch Celery logs for [BATCH] Chunk 1/N processed..."
+                )
+            elif resp.status_code == 403:
+                resp.failure("Admin auth required — set ADMIN_TOKEN env var")
+            else:
+                resp.failure(f"Chunked batch trigger failed: {resp.status_code} {resp.text[:120]}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # APPLY MODE WEIGHTS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -833,6 +980,8 @@ def _apply_mode_weights():
         CapacityStressUser,
         CheckoutSyncUser,
         CheckoutAsyncUser,
+        BatchNaiveUser,
+        BatchChunkedUser,
     ]
 
     for cls in classes:
@@ -851,6 +1000,10 @@ def _apply_mode_weights():
         CheckoutSyncUser.weight = 1
     elif LOCUST_MODE == "req3_async":
         CheckoutAsyncUser.weight = 1
+    elif LOCUST_MODE == "req4_before":
+        BatchNaiveUser.weight = 1
+    elif LOCUST_MODE == "req4_after":
+        BatchChunkedUser.weight = 1
 
 
 _apply_mode_weights()

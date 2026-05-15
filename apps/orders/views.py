@@ -239,7 +239,7 @@ def race_demo_view(request):
 
     stock_snapshot = product.stock   # snapshot — may already be stale!
 
-    # ── Step 2: NO CHECK — this is the vulnerability! ────────────────────────
+        # ── Step 2: NO CHECK — this is the vulnerability! ────────────────────────
     # A real checkout would check: if stock_snapshot < 1: raise error
     # Here we SKIP that check to show pure overselling behaviour.
     # Every single concurrent user proceeds regardless of snapshot value.
@@ -391,4 +391,3 @@ def update_order_status_view(request, order_id):
     except Order.DoesNotExist:
         return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
     return Response(OrderSerializer(order).data)
-    

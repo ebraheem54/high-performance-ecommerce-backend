@@ -13,7 +13,7 @@ urlpatterns = [
 
     # ── DEMO ONLY routes — safe to remove after report ────────────────────────
     # Requirement 2: capacity stress demo
-    path("capacity-stress/",     views.capacity_stress_view,     name="capacity-stress"),
+    path("capacity-stress/",     views.CapacityStressView.as_view(), name="capacity-stress"),
     # Requirement 4: naive (no-chunk) batch demo
     path("trigger-batch-naive/", views.trigger_batch_naive_view, name="trigger-batch-naive"),
 ]

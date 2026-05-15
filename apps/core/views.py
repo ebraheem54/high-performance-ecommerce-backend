@@ -2,18 +2,28 @@
 Core API views.
 """
 
+from __future__ import annotations
+
 import logging
+from threading import Lock
+from typing import Any
+
+from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAdminUser
+from rest_framework.request import Request
 from rest_framework.response import Response
-from rest_framework import status
 
 logger = logging.getLogger(__name__)
+
+CAPACITY_STRESS_DB_SAMPLE_EVERY = 20
+_capacity_stress_request_count = 0
+_capacity_stress_request_lock = Lock()
 
 
 @api_view(["POST"])
 @permission_classes([IsAdminUser])
-def trigger_batch_view(request):
+def trigger_batch_view(request: Request) -> Response:
     """
     POST /api/core/trigger-batch/  — admin only
 
@@ -39,6 +49,8 @@ def trigger_batch_view(request):
         if raw is not None:
             try:
                 demo_chunk_size = int(raw)
+                if demo_chunk_size <= 0:
+                    raise ValueError
             except (TypeError, ValueError):
                 return Response(
                     {"error": "chunk_size must be a positive integer."},
@@ -75,95 +87,103 @@ def trigger_batch_view(request):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ⚠ DEMO ONLY — Capacity Stress View (Requirement 2 — BEFORE solution context)
+# DEMO ONLY — Capacity Stress View (Requirement 2)
 # ══════════════════════════════════════════════════════════════════════════════
 # Purpose:
-#   Simulate a heavy endpoint that runs several sequential DB queries with
-#   small sleep delays. Used to create measurable load for Locust screenshots
-#   and pg_stat_activity comparisons.
-#
-# IMPORTANT: This route alone does NOT prove CONN_MAX_AGE.
-# It is a CAPACITY STRESS DEMO only.
-#
-# Real before/after evidence requires:
-#   Before: CONN_MAX_AGE=0  → restart server → run Locust → capture pg_stat_activity
-#   After:  CONN_MAX_AGE=60 → restart server → run Locust → capture pg_stat_activity
-#
-#   Commands:
-#     # Count open DB connections during load:
-#     psql $DATABASE_URL -c "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database();"
-#
-#     # Before (new connection per request):
-#     CONN_MAX_AGE=0 python manage.py runserver 0.0.0.0:5000
-#
-#     # After (connections reused for 60s):
-#     CONN_MAX_AGE=60 python manage.py runserver 0.0.0.0:5000
+#   Lightweight Locust endpoint for Requirement 2. It avoids normal ORM work and
+#   samples pg_stat_activity occasionally, then closes that measurement
+#   connection so the demo endpoint does not inflate persistent DB connections.
 #
 # To REMOVE: delete this function + its URL pattern in urls.py.
 # ══════════════════════════════════════════════════════════════════════════════
 
-@api_view(["POST"])
-@permission_classes([IsAdminUser])
-def capacity_stress_view(request):
+class CapacityStressView(generics.GenericAPIView):
     """
     POST /api/core/capacity-stress/  — admin only
 
-    ⚠ DEMO ONLY — Capacity stress endpoint for Requirement 2.
-    Runs 5 sequential DB queries with sleep delays to create measurable load.
-    Returns elapsed time and current DB connection count from pg_stat_activity.
+    Lightweight capacity endpoint for Requirement 2.
+
+    Connection count is sampled every CAPACITY_STRESS_DB_SAMPLE_EVERY requests,
+    or forced with ?sample_db=1.
     """
-    import time as _time
-    from django.db import connection
+    permission_classes = [IsAdminUser]
 
-    started = _time.time()
-    query_times = []
+    def post(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        import time as _time
+        from django.db import connection
 
-    # ── 5 sequential DB queries with sleep between them ───────────────────────
-    # Simulates a poorly optimised endpoint that holds a DB connection
-    # open for an extended period under concurrent load.
-    from apps.products.models import Product
-    from apps.orders.models import Order
+        started = _time.time()
+        work_started = _time.time()
+        work_units = sum(range(100))
+        work_time = round(_time.time() - work_started, 3)
 
-    for i in range(1, 6):
-        q_start = _time.time()
-        _ = list(Product.objects.filter(is_active=True).order_by("?")[:20])
-        _time.sleep(0.05)   # 50ms simulated work between queries
-        query_times.append(round(_time.time() - q_start, 3))
+        global _capacity_stress_request_count
+        with _capacity_stress_request_lock:
+            _capacity_stress_request_count += 1
+            request_count = _capacity_stress_request_count
 
-    # ── Read current DB connection count from pg_stat_activity ────────────────
-    db_conn_count = None
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT count(*) FROM pg_stat_activity "
-                "WHERE datname = current_database();"
-            )
-            db_conn_count = cursor.fetchone()[0]
-    except Exception as exc:
-        logger.warning("[CAPACITY-STRESS] Could not read pg_stat_activity: %s", exc)
+        force_db_sample = request.query_params.get("sample_db") in {"1", "true", "yes"}
+        should_sample_db = (
+            force_db_sample
+            or request_count % CAPACITY_STRESS_DB_SAMPLE_EVERY == 0
+        )
 
-    elapsed = round(_time.time() - started, 3)
+        # Sampling pg_stat_activity every request adds measurable DB work under load.
+        db_conn_count = None
+        if should_sample_db:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database();"
+                    )
+                    db_conn_count = cursor.fetchone()[0]
+            except Exception as exc:
+                logger.warning(
+                    "[CAPACITY-STRESS] Could not read pg_stat_activity: %s",
+                    exc,
+                )
 
-    logger.info(
-        "[CAPACITY-STRESS] ⚠ DEMO — stress request completed in %.3fs | "
-        "open_db_connections=%s",
-        elapsed, db_conn_count,
-    )
+        elapsed = round(_time.time() - started, 3)
 
-    return Response(
-        {
-            "_demo"              : "⚠ DEMO ONLY — capacity stress endpoint (Req 2)",
-            "elapsed_s"          : elapsed,
-            "query_count"        : 5,
-            "query_times_s"      : query_times,
-            "open_db_connections": db_conn_count,
-            "instructions"       : {
-                "before": "Set CONN_MAX_AGE=0, restart server, run Locust, read pg_stat_activity",
-                "after" : "Set CONN_MAX_AGE=60, restart server, run Locust, read pg_stat_activity",
-                "query" : "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database();",
+        logger.debug(
+            "[CAPACITY-STRESS] completed in %.3fs | work_units=%s | sampled_db=%s | "
+            "open_db_connections=%s",
+            elapsed,
+            work_units,
+            should_sample_db,
+            db_conn_count,
+        )
+
+        # Authentication may touch the DB before this view runs. This endpoint is
+        # a load-test helper, so close its request connection instead of keeping
+        # it in the per-thread persistent pool.
+        connection.close()
+
+        return Response(
+            {
+                "_demo": "capacity stress endpoint for Requirement 2",
+                "elapsed_s": elapsed,
+                "app_work_time_s": work_time,
+                "open_db_connections": db_conn_count,
+                "db_connection_sampled": should_sample_db,
+                "db_sample_every": CAPACITY_STRESS_DB_SAMPLE_EVERY,
+                "notes": {
+                    "query_strategy": "no ORM query during normal requests",
+                    "connection_note": (
+                        "This endpoint closes its request DB connection so it "
+                        "does not inflate the persistent per-thread connection pool."
+                    ),
+                },
+                "instructions": {
+                    "before": "Set CONN_MAX_AGE=0, restart app containers, run Locust, capture pg_stat_activity.",
+                    "after": "Set CONN_MAX_AGE=60, restart app containers, run Locust, capture pg_stat_activity.",
+                    "force_sample": "POST /api/core/capacity-stress/?sample_db=1",
+                    "query": "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database();",
+                },
             },
-        }
-    )
+            status=status.HTTP_200_OK,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -179,7 +199,7 @@ def capacity_stress_view(request):
 
 @api_view(["POST"])
 @permission_classes([IsAdminUser])
-def trigger_batch_naive_view(request):
+def trigger_batch_naive_view(request: Request) -> Response:
     """
     POST /api/core/trigger-batch-naive/  — admin only
 
@@ -197,7 +217,16 @@ def trigger_batch_naive_view(request):
     try:
         from apps.core.tasks import run_daily_sales_batch_naive_task
 
-        days_back = int(request.data.get("days_back", 1))
+        try:
+            days_back = int(request.data.get("days_back", 1))
+            if days_back <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "days_back must be a positive integer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         result    = run_daily_sales_batch_naive_task.apply_async(
             kwargs={"days_back": days_back}
         )

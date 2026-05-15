@@ -98,6 +98,7 @@ else:
 
 # ── DB Connection Pooling — Resource Management (Requirement 2) ───────────────
 DATABASES["default"]["CONN_MAX_AGE"] = config("CONN_MAX_AGE", default=60, cast=int)
+DATABASES["default"]["DISABLE_SERVER_SIDE_CURSORS"] = True
 
 
 # ── Password Validation ───────────────────────────────────────────────────────
