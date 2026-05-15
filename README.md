@@ -197,18 +197,20 @@ docker compose version
 
 ## Environment Variables
 
-The project uses `.env` for runtime configuration. A development setup should include values like:
+The project uses `.env` for runtime configuration. Do not commit real secrets, passwords, SMTP credentials, or production keys. Keep the real `.env` file local, and use placeholders in documentation or in a safe `.env.example` file.
+
+Example development template:
 
 ```env
-DB_NAME=ecommerce_db
-DB_USER=ecommerce_user
-DB_PASSWORD=1234
+DB_NAME=<database-name>
+DB_USER=<database-user>
+DB_PASSWORD=<database-password>
 DB_HOST=pgbouncer
 DB_PORT=5432
 DB_ENGINE=django.db.backends.postgresql
 
 DEBUG=true
-SECRET_KEY=your-secret-key-for-development-change-in-production
+SECRET_KEY=<development-secret-key>
 ALLOWED_HOSTS=*
 
 REDIS_URL=redis://redis:6379/0
@@ -218,7 +220,7 @@ CELERY_RESULT_BACKEND=redis://redis:6379/1
 CONN_MAX_AGE=60
 ```
 
-For production, replace development secrets and passwords with secure values.
+For production, set `DEBUG=false`, use a strong `SECRET_KEY`, restrict `ALLOWED_HOSTS`, and store secrets in a secure secret manager or deployment environment variables.
 
 ## Quick Start
 
