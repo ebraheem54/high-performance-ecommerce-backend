@@ -100,14 +100,14 @@
     # ═══════════════════════════════════════════════════════════════════════════
     # REQUIREMENT 2 & 5: Resource Management + Load Distribution
     # ═══════════════════════════════════════════════════════════════════════════
-    # Strategy: 3 app containers behind Nginx load balancer
+    # Strategy: 5 app containers behind Nginx load balancer
     # Worker model: gthread — each worker spawns a controlled thread pool
     #
     # --worker-class=gthread : uses OS threads (not async), safe with Django ORM
-    # --workers=8            : 8 processes per container (24 total across 3 nodes)
+    # --workers=8            : 8 processes per container (40 total across 5 nodes)
     # --threads=3            : 3 threads per worker = 24 threads per container
     #
-    # Total thread capacity: 3 containers × 8 workers × 3 threads = 72 threads
+    # Total thread capacity: 5 containers × 8 workers × 3 threads = 120 threads
     # This comfortably handles 100 concurrent users (Requirement 9)
     # while keeping CPU/RAM bounded — no unbounded process spawning.
     #
@@ -191,6 +191,62 @@
             sleep 0.5
           done
           echo '[APP3] Starting — worker-class=gthread, workers=8, threads=3'
+          exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
+
+        "
+      depends_on:
+        migrate:
+          condition: service_completed_successfully
+      networks:
+        - ecommerce-network
+
+    app4:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_app4
+      restart: unless-stopped
+      volumes:
+        - .:/app
+        - static-data:/app/staticfiles
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo '[APP4] Waiting for database...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo '[APP4] Starting — worker-class=gthread, workers=8, threads=3'
+          exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
+
+        "
+      depends_on:
+        migrate:
+          condition: service_completed_successfully
+      networks:
+        - ecommerce-network
+
+    app5:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_app5
+      restart: unless-stopped
+      volumes:
+        - .:/app
+        - static-data:/app/staticfiles
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo '[APP5] Waiting for database...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo '[APP5] Starting — worker-class=gthread, workers=8, threads=3'
           exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
 
         "
@@ -370,7 +426,7 @@
     # ═══════════════════════════════════════════════════════════════════════════
     # NGINX - Load Balancer (Requirement 5)
     # ═══════════════════════════════════════════════════════════════════════════
-    # Distributes incoming requests across app1, app2, app3
+    # Distributes incoming requests across app1, app2, app3, app4, app5
     # Strategy: Least Connections (most efficient for mixed workload)
 
     nginx:
@@ -386,6 +442,8 @@
         - app1
         - app2
         - app3
+        - app4
+        - app5
       networks:
         - ecommerce-network
 

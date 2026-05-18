@@ -57,6 +57,8 @@ Nginx load balancer
       +--> app1: Django + Gunicorn
       +--> app2: Django + Gunicorn
       +--> app3: Django + Gunicorn
+      +--> app4: Django + Gunicorn
+      +--> app5: Django + Gunicorn
                |
                v
             PgBouncer
@@ -77,7 +79,7 @@ Redis broker/cache
 
 ### Application Layer
 
-The project runs three application containers: `ecommerce_app1`, `ecommerce_app2`, and `ecommerce_app3`. Each container runs the same Django application using Gunicorn:
+The project runs five application containers: `ecommerce_app1`, `ecommerce_app2`, `ecommerce_app3`, `ecommerce_app4`, and `ecommerce_app5`. Each container runs the same Django application using Gunicorn:
 
 ```text
 worker-class = gthread
@@ -89,7 +91,7 @@ This gives controlled parallel request handling while avoiding unbounded process
 
 ### Load Balancing
 
-Nginx is the public entry point on port `80`. It forwards traffic to `app1`, `app2`, and `app3` using the Least Connections algorithm. This is better than simple round-robin for mixed workloads because product reads, cart operations, login requests, and checkout requests do not all take the same amount of time.
+Nginx is the public entry point on port `80`. It forwards traffic to `app1`, `app2`, `app3`, `app4`, and `app5` using the Least Connections algorithm. This is better than simple round-robin for mixed workloads because product reads, cart operations, login requests, and checkout requests do not all take the same amount of time.
 
 ### Database Connection Control
 
@@ -243,7 +245,7 @@ This starts:
 - PgBouncer
 - Redis
 - migrations
-- app1, app2, app3
+- app1, app2, app3, app4, app5
 - Celery workers
 - Celery Beat
 - Nginx
@@ -264,6 +266,8 @@ ecommerce_nginx
 ecommerce_app1
 ecommerce_app2
 ecommerce_app3
+ecommerce_app4
+ecommerce_app5
 ecommerce_db
 ecommerce_pgbouncer
 ecommerce_redis
@@ -363,6 +367,8 @@ View app logs:
 docker logs -f ecommerce_app1
 docker logs -f ecommerce_app2
 docker logs -f ecommerce_app3
+docker logs -f ecommerce_app4
+docker logs -f ecommerce_app5
 ```
 
 View Nginx logs:
@@ -400,7 +406,7 @@ docker exec ecommerce_db psql -U ecommerce_user -d ecommerce_db -c "SELECT count
 Watch resource usage:
 
 ```bash
-docker stats ecommerce_app1 ecommerce_app2 ecommerce_app3 ecommerce_pgbouncer ecommerce_db ecommerce_nginx ecommerce_redis
+docker stats ecommerce_app1 ecommerce_app2 ecommerce_app3 ecommerce_app4 ecommerce_app5 ecommerce_pgbouncer ecommerce_db ecommerce_nginx ecommerce_redis
 ```
 
 ## Load Testing With Locust
@@ -509,7 +515,7 @@ docker exec ecommerce_db psql -U ecommerce_user -d ecommerce_db \
 Monitor containers:
 
 ```bash
-docker stats ecommerce_app1 ecommerce_app2 ecommerce_app3 ecommerce_pgbouncer ecommerce_db ecommerce_nginx ecommerce_redis
+docker stats ecommerce_app1 ecommerce_app2 ecommerce_app3 ecommerce_app4 ecommerce_app5 ecommerce_pgbouncer ecommerce_db ecommerce_nginx ecommerce_redis
 ```
 
 ### Requirement 3: Async Queues
@@ -606,7 +612,7 @@ docker compose run --rm \
 Map app container IPs:
 
 ```bash
-docker inspect -f '{{.Name}} {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ecommerce_app1 ecommerce_app2 ecommerce_app3
+docker inspect -f '{{.Name}} {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ecommerce_app1 ecommerce_app2 ecommerce_app3 ecommerce_app4 ecommerce_app5
 ```
 
 Show Nginx upstream logs:
@@ -621,6 +627,8 @@ Look for different upstreams:
 upstream=<app1-ip>:8000
 upstream=<app2-ip>:8000
 upstream=<app3-ip>:8000
+upstream=<app4-ip>:8000
+upstream=<app5-ip>:8000
 ```
 
 ### Requirement 6: Distributed Caching
@@ -753,7 +761,7 @@ For a university/report submission, capture:
 - `docker-compose.yml`: app1/app2/app3, PgBouncer, Celery workers, Nginx.
 - `nginx/nginx.conf`: Least Connections upstream config and upstream logging.
 - Locust results for normal, req2, req4_before, and req4_after modes.
-- Nginx logs showing requests distributed to all three upstream app containers.
+- Nginx logs showing requests distributed to all five upstream app containers.
 - Celery logs showing dedicated queues and batch chunk processing.
 - PostgreSQL query output showing stock never becomes negative after safe checkout.
 - PgBouncer/DB connection evidence showing controlled database connections.
