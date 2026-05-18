@@ -116,11 +116,11 @@ Inventory could become negatively valued, which proves that overselling has occu
 
 this db before start test:
 
-![this database before start test](images/req_1/newdb.png)
+![this database before start test](/Docs/images/req_1/newdb.png)
 
 now we start test: This is a Python-based testing tool called locust that allows us to synchronize a selected number of requests.
 
-![Locust ui when test the first case](images/req_1/locust_ui.png)
+![Locust ui when test the first case](/Docs/images/req_1/locust_ui.png)
 
 
 
@@ -130,12 +130,12 @@ The unsafe endpoint intentionally reads a product without locking, sleeps for 10
 
 and this fail of endpoint
 
-![endpoint Fail Error](images/req_1/fail.png)
+![endpoint Fail Error](/Docs/images/req_1/fail.png)
 
 and this db after start test (We have now examined the database, checked the inventory, and confirmed that the problem does indeed exist.):
 
 
-![the screenshot for database after test ](images/req_1/negativedb.png)
+![the screenshot for database after test ](/Docs/images/req_1/negativedb.png)
 
 
 **After:** Solution
@@ -162,17 +162,23 @@ Stock never becomes negative.
 Some requests succeed with HTTP 201.
 Excess requests are rejected with HTTP 400 when stock is exhausted.
 ```
-test after Solution with locust
+test after Solution with locust:
 
-![Locust Ui test after solution for case 1](images/req_1/after.png)
+![Locust Ui test after solution for case 1](/Docs/images/req_1/after.png)
+
 
 this fail (becouse the stock empty and the logic return 404 not found)
 
-![why fail add to cart endpoint](images/req_1/after.png)
+![why fail add to cart endpoint](/Docs/images/req_1/fail_case1_after_solution.png)
 
 and this  from our terminal:
 
-![result form terminal:](images/req_1/terminal_after.png)
+![result form terminal:](/Docs/images/req_1/terminal_after.png)
+
+
+no negative in Db :
+![](/Docs/images/req_1/db_after_solution_case1.png)
+
 
 ### 3.4 Case 2: Wallet Checkout / Double Spend
 
@@ -193,138 +199,241 @@ This endpoint maps to the synchronous wallet checkout. It demonstrates the risk 
 now the test in locust:
 This image was taken from a test of the Wallet Checkout/Double Spend in Locust scenario, where 269 simultaneous requests were sent to the wallet payment endpoint. It shows an insufficient number of requests that failed or were rejected, which is expected in this scenario because the system prevents multiple attempts to allocate phone credit during a simultaneous push.
 
-![test wallet checkout ](images/req_1/case2_before_solution.png)
+![test wallet checkout ](/Docs/images/req_1/case2_before_solution.png)
 
 
 This image shows that Locust recorded 234 rejected requests for Wallet Checkout/Double Spend, due to the appearance of code 409 Conflict.
 Code 409 here does not indicate a system failure, but rather that the system detected a conflict attempt during the wallet payment and blocked it securely. This means that another request was attempting to use the same wallet balance at the same time, so the request was rejected to protect the balance and prevent a double-spend issue.
 
-![fail endpoint](images/req_1/fail_case2_409.png)
+![fail endpoint](/Docs/images/req_1/fail_case2_409.png)
 
 
 This analysis is performed at the terminal after the test is complete.
-
-![figure](images/req_1/terminal_for_case2_beofre_solution.png)
+[](/Docs/images/req_1/terminal_for_case2_beofre_solution.png)
 
 
 
 We took a screenshot of the balance for two reasons:
 1. To prove that simultaneous orders put pressure on the balance (meaning that many purchases were made from the wallet):
-2. 
-![figure](images/req_1/db_for_wallet_case2.png)
+
+![](/Docs/images/req_1/db_for_wallet_case2.png)
+
+
 
 
 2. Proof that the system did not allow double spend (there is no negative balance, meaning the user did not spend more than their balance).
-   
-![db](images/req_1/for_case2_no_wallert_negative.png)
+![db](/Docs/images/req_1/for_case2_no_wallert_negative.png)
 
 
 
+----------
 
 **After:** `POST /api/orders/checkout-wallet-async/`
 
-The async endpoint returns HTTP 202 immediately and queues `process_wallet_payment_async`. The actual wallet operation calls `checkout_with_wallet()`, which locks the user row with `select_for_update()`, locks product rows, checks wallet balance under the user lock, simulates the external payment delay, deducts balance, deducts stock, and creates the completed wallet payment.
+Short Professional Summary:
 
+The wallet checkout is handled asynchronously to improve response time. The endpoint immediately returns HTTP 202 Accepted and queues process_wallet_payment_async to process the payment in the background.
 
-Expected safe result:
+The actual wallet operation runs inside checkout_with_wallet() using transaction.atomic(). It locks the user row with select_for_update() before checking and deducting the wallet balance, and also locks product rows before updating stock.
 
-```text
-Only valid wallet checkouts consume balance.
-Concurrent requests cannot spend the same wallet balance twice.
-Insufficient balance is rejected by the locked transaction.
-```
+This ensures that concurrent requests cannot use the same wallet balance or modify the same stock at the same time.
+
+Safe Result:
+
+The first valid wallet checkout succeeds, while duplicated or concurrent attempts are safely rejected if the balance or stock is no longer sufficient. This prevents double spending and keeps wallet, stock, and payment data consistent.
+
+![](/Docs/images/req_1/case2_after_solution_locsut.png)
+
+--------------------------
 
 ### 3.5 Case 3: Double Payment Processing
+This situation occurs when a payment processing request is sent for the same payment more than once.
+
+Before resolution, if the payment history is not locked, two requests might see the payment status as "pending."
+
+Potential outcome:
+
+The same payment might be processed twice.
+
+In the current system, a new payment queue is not created for each attempt, but the risk arises when an unsafe endpoint accepts the second payment attempt and modifies or replaces the transaction ID.
 
 **Before:** `POST /api/orders/<id>/process-payment-unsafe/`
 
 The unsafe endpoint reads the order and payment without row locks. It sleeps for 100 ms, then marks the payment as completed even if another request already completed it. This simulates a duplicate charge bug.
 
+Repeated payment requests were sent for the same application using an insecure endpoint. The number of failures in Locust does not indicate server failure, but rather that Locust detected that the duplicate payment was accepted, which constitutes a race-condition conflict.
+
+![](/Docs/images/req_1/case3_before_solution.png)
+
+---
+
+This message proves that the same order was paid more than once through an insecure endpoint. Locust registered it as a conflict because repeated payment for the same order is a serious error.
+
+![](/images/req_1/fail_case3.png)
+
+---
+
+
+this db It appears that some payments have been completed. Since the system uses a one-to-one relationship between the order and the payment, a second payment row for the same order will not appear. Therefore, we are not looking for two rows, but rather for the same payment row to have been updated again.
+
+![](/Docs/images/req_1/db_beforesolution_case3.png)
+
+
+
+----
+
+The image illustrates the database state during the third state test of the first requirement, where purchase orders associated with payment transactions are examined. It shows that some orders have reached the "Completed" payment state while others remain "Pending," which helps demonstrate that a concurrent processing issue occurred before the protection was applied, such as the possibility of executing the payment or attempting to update the payment state asynchronously.
+
+![alt text](/Docs/images/req_1/db_for_case3_before_solution.png)
+
 **After:** `POST /api/orders/<id>/process-payment/`
+The process_payment() service ensures that a payment is processed only once by wrapping the operation inside transaction.atomic() and locking both the Order and related Payment records using select_for_update().
 
-The safe service `process_payment()` locks the `Order` row and the related `Payment` row with `select_for_update()`. It rejects cancelled orders and rejects a payment that is already `COMPLETED`.
+This prevents multiple concurrent requests from modifying the same payment data at the same time. Before completing the payment, the service validates the order state and rejects cancelled orders. It also checks whether the payment is already marked as COMPLETED.
 
-Expected safe result:
+If a duplicate payment attempt is detected, the system rejects it with a clear response instead of processing the payment again.
 
-```text
-First payment request succeeds with HTTP 200.
-Second payment request is rejected with HTTP 400: Payment already completed.
-```
+Safe Result:
+
+Only the first valid payment request succeeds. Any repeated or concurrent payment attempt is safely rejected, preventing double payment processing and keeping the order/payment state consistent.
+
+
+this from ui of locust
+
+![](/Docs/images/req_1/case3_after_locust.png)
+
+
+
+resutl from our terminal
+![](/Docs/images/req_1/terminal_case3_after.png)
+
+--------
 
 ### 3.6 Case 4: Cancel Order While Payment Is Processing
 
+This situation occurs when a cancellation request is submitted at the same time that payment for the same order is being processed.
+
+Before the solution:
+Both the cancel and process payment requests attempt to modify the same order concurrently.
+
+Potential outcome:
+The order may reach an illogical state, such as being cancelled after its payment has already been completed.
+
 **Before:** `POST /api/orders/<id>/cancel-unsafe/`
 
-The unsafe cancellation endpoint does not lock the order row and does not enforce the order state machine. It can produce an invalid state where payment is completed but the order is later cancelled.
+The unsafe cancellation endpoint does not lock the order row and does not enforce the order state machine. As a result, payment and cancellation can update the same order independently, producing an invalid state where a completed payment is followed by order cancellation.
+
+The high failure rate in Locust confirms this race condition and proves that row-level locking with state validation is required to prevent paid orders from being cancelled incorrectly.
+
+![](/Docs/images/req_1/locust_for_case4.png)
+
+The error `409 Conflict: paid order was cancelled` shows that payment was completed, but the unsafe cancellation endpoint still cancelled the order. This confirms that concurrent operations can create inconsistent data before applying the safe solution.
+
+![](/Docs/images/req_1/fail_for_case4_before_solution.png)
+
+this terminal when finish test:
+
+The terminal counts blocked requests, while Locust counts unexpected failures. In this case, HTTP 400 is expected because the protected endpoint should reject invalid cancellation attempts. Therefore, the terminal shows blocked requests, but Locust reports zero failures because the system behaved correctly.
+
+![](/Docs/images/req_1/terminal_case4_before_solution.png)
+
+This terminal output shows Requirement 1 - Case 4 after the solution. The protected `/api/orders/<id>/cancel/` endpoint uses row-level locking and state validation.
+
+
+Although the terminal shows `Blocked - wrong state (400)`, Locust reports zero failures because HTTP 400 is the expected safe response in this scenario. The protected endpoint correctly rejects invalid cancellation attempts, so Locust marks these responses as successful behavior rather than test failures.
+
+![](/Docs/images/req_1/locust_case4_after.png)
+
+
+Only 1 cancellation succeeded, while 441 requests were blocked with HTTP 400, confirming that paid or processing orders can no longer be cancelled incorrectly during concurrent payment activity.
+
+The database snapshot joins the latest orders with their payment records to detect inconsistent state transitions during concurrent cancellation and payment processing. It helps verify whether an order reached an invalid combination, such as completed payment with incorrect order cancellation.
+
+![](/Docs/images/req_1/db_for_case4_before_solution.png)
+
 
 **After:** `POST /api/orders/<id>/cancel/`
 
 The safe service `cancel_order()` locks the order row with `select_for_update()` and only permits cancellation while the order is `PENDING` or `CONFIRMED`. Once payment processing changes the order to `PROCESSING`, cancellation is rejected.
 
-Expected safe result:
 
-```text
-Cancellation succeeds only for cancellable states.
-Cancellation is blocked for PROCESSING, CANCELLED, or other invalid states.
-```
+The solution uses **pessimistic locking** with `transaction.atomic()` and `select_for_update()` to lock the order row during both payment processing and cancellation. It also applies state validation to ensure that each order status transition is valid.
+
+Safe outcome:
+If payment is completed first, cancellation is blocked. If cancellation happens first, payment processing is blocked. Therefore, an order can no longer become both `CANCELLED` and `PAID` at the same time.
+
+
+
+The HTTP 400 responses are expected after the solution. They indicate that the protected endpoint correctly rejected cancellation requests when the order state did not allow cancellation, preventing a paid order from being cancelled.
+
+![](/Docs/images/req_1/terminal_case4_after.png)
+
+
+ no paid order is shown as cancelled, confirming that the protected endpoint prevents invalid order/payment states.
+![](/Docs/images/req_1/db-case4_after.png)
+
+
 
 ### 3.7 Case 5: Product Reservation / Over-Reservation
+
+This situation occurs when multiple users try to reserve the same low-stock product at the same time.
+
+Before the solution:
+The unsafe reservation endpoint creates product reservations without locking the product row or checking the latest reserved quantity atomically.
+
+Potential outcome:
+The total active reserved quantity can become greater than the actual available stock, which means the system has over-reserved the product.
+
 
 **Before:** `POST /api/products/<id>/reserve-unsafe/`
 
 The unsafe endpoint calculates active reservations without locking, sleeps for 100 ms, then creates a new `OrderLock`. Concurrent users can all see the same old reserved quantity and create reservations that exceed product stock.
 
+Locust statistics for Requirement 1 - Case 5 BEFORE. The unsafe reservation endpoint `/api/products/{id}/reserve-unsafe/` received 357 requests and all of them failed, showing that the test successfully exposed the over-reservation race condition.
+
+![](/Docs/images/req_1/case5_before_solution_locust.png)
+
+
+
+The HTTP 400 responses are expected after the solution. They indicate that the protected endpoint correctly rejected reservation requests when stock was insufficient, instead of allowing over-reservation.
+
+![](/Docs/images/req_1/terminal_case5_after.png)
+
+-----
+
+
+The failure message `OVER-RESERVED: reserved=114 stock=149` shows that concurrent reservation requests caused the active reserved quantity to exceed the expected safe reservation limit. This confirms that the unsafe endpoint allowed inconsistent reservation behavior before row-level locking.
+![](/Docs/images/req_1/case5_fail.png)
+
+
+The database shows an invalid reservation state before the solution: one low-stock product has negative stock and active reservations at the same time. This confirms that concurrent unsafe reservation requests can corrupt inventory without row-level locking.
+![](/Docs/images/req_1/db_case5_before_solution.png)
+
+
+and this from terminal
+![](/Docs/images/req_1/terminalcase5_before_solu.png)
+
+
 **After:** `POST /api/products/<id>/reserve/`
 
 The safe endpoint calls `create_order_lock()`, which wraps the reservation in a transaction and locks the product row with `select_for_update()`. The request only creates the reservation if enough stock is available.
 
-Expected safe result:
+The solution uses **pessimistic locking** with `transaction.atomic()` and `select_for_update()` to lock the product row during the reservation process. The system locks the product first, checks the available quantity, and creates the reservation only if enough stock is available.
 
-```text
-Valid reservations return HTTP 201.
-Excess reservations return HTTP 400.
-Total active reservations cannot exceed available stock through the safe endpoint.
-```
+Safe outcome:
+Reservations are created only within the available stock limit, and any extra reservation request is rejected.
+![](/Docs/images/req_1/locust_after_case5.png)
 
-### 3.8 Validation Commands
 
-Start and seed the system:
+The HTTP 400 responses are expected after the solution. They indicate that the protected endpoint correctly rejected reservation requests when stock was insufficient, instead of allowing over-reservation.
 
-```bash
-docker compose up --build -d
-docker compose run --rm app1 python manage.py seed_ecommerce --clean
-```
+![](/Docs/images/req_1/terminal_case5_after.png)
 
-Run before/demo race-condition tests:
 
-```bash
-docker compose run --rm \
-  -e LOCUST_MODE=race1_before \
-  locust -f locustfile.py --host http://nginx:80 \
-  --users 50 --spawn-rate 10 --headless --run-time 1m
-```
+db:After the solution, all race-condition products remain in a `SAFE` reservation state. The active reserved quantity is within the available stock, confirming that pessimistic locking prevents over-reservation.
 
-Run safe race-condition tests:
+![](/Docs/images/req_1/db_case5_before_solution.png)
 
-```bash
-docker compose run --rm \
-  -e LOCUST_MODE=race1_after \
-  locust -f locustfile.py --host http://nginx:80 \
-  --users 50 --spawn-rate 10 --headless --run-time 1m
-```
-
-Verify no negative stock after the safe run:
-
-```bash
-docker exec ecommerce_db psql -U ecommerce_user -d ecommerce_db \
-  -c "SELECT id, name, stock FROM products_product WHERE stock < 0;"
-```
-
-Expected result:
-
-```text
-0 rows
-```
 
 ---
 
