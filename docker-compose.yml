@@ -1,0 +1,457 @@
+  services:
+    db:
+      image: postgres:16-alpine
+      container_name: ecommerce_db
+      restart: unless-stopped
+      command: postgres -c max_connections=200
+      env_file:
+        - .env
+      environment:
+        POSTGRES_DB: ${DB_NAME}
+        POSTGRES_USER: ${DB_USER}
+        POSTGRES_PASSWORD: ${DB_PASSWORD}
+      volumes:
+        - dev-db-data:/var/lib/postgresql/data
+      ports:
+        - "5432:5432"
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+      networks:
+        - ecommerce-network
+
+    pgbouncer:
+      image: edoburu/pgbouncer:v1.25.1-p0
+      container_name: ecommerce_pgbouncer
+      restart: unless-stopped
+      environment:
+        DB_HOST: db
+        DB_PORT: 5432
+        DB_USER: ${DB_USER}
+        DB_PASSWORD: ${DB_PASSWORD}
+        DB_NAME: ${DB_NAME}
+        AUTH_TYPE: scram-sha-256
+        POOL_MODE: transaction
+        MAX_CLIENT_CONN: 500
+        DEFAULT_POOL_SIZE: 30
+        RESERVE_POOL_SIZE: 10
+        IGNORE_STARTUP_PARAMETERS: extra_float_digits
+      ports:
+        - "6432:5432"
+      depends_on:
+        db:
+          condition: service_healthy
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U ${DB_USER}"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+      networks:
+        - ecommerce-network
+
+    redis:
+      image: redis:7-alpine
+      container_name: ecommerce_redis
+      restart: unless-stopped
+      command: redis-server --appendonly yes
+      volumes:
+        - redis-data:/data
+      ports:
+        - "6379:6379"
+      healthcheck:
+        test: ["CMD", "redis-cli", "ping"]
+        interval: 5s
+        timeout: 3s
+        retries: 5
+      networks:
+        - ecommerce-network
+
+    migrate:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo 'Waiting for database at ${DB_HOST}:${DB_PORT}...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo 'Database started'
+
+          echo 'Running migrations...'
+          python manage.py migrate --noinput
+          echo 'Migrations completed'
+        "
+      depends_on:
+        pgbouncer:
+          condition: service_healthy
+        db:
+          condition: service_healthy
+        redis:
+          condition: service_healthy
+      networks:
+        - ecommerce-network
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # REQUIREMENT 2 & 5: Resource Management + Load Distribution
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Strategy: 5 app containers behind Nginx load balancer
+    # Worker model: gthread — each worker spawns a controlled thread pool
+    #
+    # --worker-class=gthread : uses OS threads (not async), safe with Django ORM
+    # --workers=8            : 8 processes per container (40 total across 5 nodes)
+    # --threads=3            : 3 threads per worker = 24 threads per container
+    #
+    # Total thread capacity: 5 containers × 8 workers × 3 threads = 120 threads
+    # This comfortably handles 100 concurrent users (Requirement 9)
+    # while keeping CPU/RAM bounded — no unbounded process spawning.
+    #
+    # DB connection control:
+    #   app/celery/beat connect to PgBouncer at pgbouncer:5432
+    #   PgBouncer keeps a smaller transaction pool to PostgreSQL at db:5432
+    #   PostgreSQL max_connections is set to 200 as backend headroom.
+
+    app1:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_app1
+      restart: unless-stopped
+      volumes:
+        - .:/app
+        - static-data:/app/staticfiles
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo '[APP1] Waiting for database...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo '[APP1] Starting — worker-class=gthread, workers=8, threads=3'
+          exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
+
+        "
+      depends_on:
+        migrate:
+          condition: service_completed_successfully
+      networks:
+        - ecommerce-network
+
+    app2:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_app2
+      restart: unless-stopped
+      volumes:
+        - .:/app
+        - static-data:/app/staticfiles
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo '[APP2] Waiting for database...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo '[APP2] Starting — worker-class=gthread, workers=8, threads=3'
+          exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
+
+        "
+      depends_on:
+        migrate:
+          condition: service_completed_successfully
+      networks:
+        - ecommerce-network
+
+    app3:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_app3
+      restart: unless-stopped
+      volumes:
+        - .:/app
+        - static-data:/app/staticfiles
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo '[APP3] Waiting for database...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo '[APP3] Starting — worker-class=gthread, workers=8, threads=3'
+          exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
+
+        "
+      depends_on:
+        migrate:
+          condition: service_completed_successfully
+      networks:
+        - ecommerce-network
+
+    app4:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_app4
+      restart: unless-stopped
+      volumes:
+        - .:/app
+        - static-data:/app/staticfiles
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo '[APP4] Waiting for database...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo '[APP4] Starting — worker-class=gthread, workers=8, threads=3'
+          exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
+
+        "
+      depends_on:
+        migrate:
+          condition: service_completed_successfully
+      networks:
+        - ecommerce-network
+
+    app5:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_app5
+      restart: unless-stopped
+      volumes:
+        - .:/app
+        - static-data:/app/staticfiles
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo '[APP5] Waiting for database...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo '[APP5] Starting — worker-class=gthread, workers=8, threads=3'
+          exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
+
+        "
+      depends_on:
+        migrate:
+          condition: service_completed_successfully
+      networks:
+        - ecommerce-network
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # REQUIREMENT 3: Async Queues — Dedicated Celery Workers per Queue
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Three isolated workers so tasks routed to emails/batch/celery queues are
+    # always consumed. A single worker listening to all queues allows a flood of
+    # email tasks to starve batch jobs, or vice-versa.
+    #
+    # Queue routing is defined in config/settings.py (CELERY_TASK_ROUTES).
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Worker 1 — Default / General tasks (queue: celery)
+    # concurrency=2: moderate — handles misc tasks like cache invalidation
+    celery_worker:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_celery_worker
+      restart: unless-stopped
+      volumes:
+        - .:/app
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo '[DEFAULT-WORKER] Waiting for database at ${DB_HOST}:${DB_PORT}...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo '[DEFAULT-WORKER] Starting — queue=celery, concurrency=2'
+          celery -A config worker -l info --concurrency=2 -Q celery -n default_worker@%h
+        "
+      depends_on:
+        migrate:
+          condition: service_completed_successfully
+      networks:
+        - ecommerce-network
+
+    # Worker 2 — Email tasks (queue: emails)
+    # concurrency=4: I/O-bound (SMTP waits), higher concurrency is safe and fast
+    celery_email_worker:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_celery_email_worker
+      restart: unless-stopped
+      volumes:
+        - .:/app
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo '[EMAIL-WORKER] Waiting for database at ${DB_HOST}:${DB_PORT}...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo '[EMAIL-WORKER] Starting — queue=emails, concurrency=4'
+          celery -A config worker -l info --concurrency=4 -Q emails -n email_worker@%h
+        "
+      depends_on:
+        migrate:
+          condition: service_completed_successfully
+      networks:
+        - ecommerce-network
+
+    # Worker 3 — Batch processing tasks (queue: batch)
+    # concurrency=1: DB-heavy — running multiple batch jobs simultaneously
+    # would put excessive pressure on PostgreSQL (multiple full-table scans)
+    celery_batch_worker:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_celery_batch_worker
+      restart: unless-stopped
+      volumes:
+        - .:/app
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo '[BATCH-WORKER] Waiting for database at ${DB_HOST}:${DB_PORT}...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo '[BATCH-WORKER] Starting — queue=batch, concurrency=1'
+          celery -A config worker -l info --concurrency=1 -Q batch -n batch_worker@%h
+        "
+      depends_on:
+        migrate:
+          condition: service_completed_successfully
+      networks:
+        - ecommerce-network
+
+    celery_beat:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_celery_beat
+      restart: unless-stopped
+      volumes:
+        - .:/app
+      env_file:
+        - .env
+      command: >
+        sh -c "
+          echo 'Waiting for database at ${DB_HOST}:${DB_PORT}...'
+          until nc -z ${DB_HOST} ${DB_PORT}; do
+            sleep 0.5
+          done
+          echo 'Database started'
+
+          echo 'Starting Celery beat...'
+          celery -A config beat -l info --scheduler django_celery_beat.schedulers.DatabaseScheduler
+        "
+      depends_on:
+        migrate:
+          condition: service_completed_successfully
+      networks:
+        - ecommerce-network
+
+    # Flower - Celery monitoring dashboard
+    flower:
+      build:
+        context: .
+        args:
+          DEV: "true"
+      container_name: ecommerce_flower
+      restart: unless-stopped
+      env_file:
+        - .env
+      command: celery -A config flower --port=5555
+      ports:
+        - "5555:5555"
+      depends_on:
+        - redis
+      networks:
+        - ecommerce-network
+
+    pgadmin:
+      image: dpage/pgadmin4
+      container_name: ecommerce_pgadmin
+      restart: unless-stopped
+      environment:
+        PGADMIN_DEFAULT_EMAIL: admin@admin.com
+        PGADMIN_DEFAULT_PASSWORD: admin
+      ports:
+        - "5050:80"
+      depends_on:
+        - db
+      networks:
+        - ecommerce-network
+
+    locust:
+      image: locustio/locust
+      container_name: ecommerce_locust
+      working_dir: /mnt/locust
+      volumes:
+        - .:/mnt/locust
+      ports:
+        - "8089:8089"
+      networks:
+        - ecommerce-network
+      command: -f locustfile.py -H http://nginx:80
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # NGINX - Load Balancer (Requirement 5)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Distributes incoming requests across app1, app2, app3, app4, app5
+    # Strategy: Least Connections (most efficient for mixed workload)
+
+    nginx:
+      image: nginx:alpine
+      container_name: ecommerce_nginx
+      restart: unless-stopped
+      ports:
+        - "80:80"
+      volumes:
+        - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+        - static-data:/static
+      depends_on:
+        - app1
+        - app2
+        - app3
+        - app4
+        - app5
+      networks:
+        - ecommerce-network
+
+  volumes:
+    dev-db-data:
+    redis-data:
+    static-data:
+
+  networks:
+    ecommerce-network:
+      driver: bridge
