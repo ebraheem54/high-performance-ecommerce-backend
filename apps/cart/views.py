@@ -74,6 +74,37 @@ def remove_from_cart_view(request, product_id):
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def update_cart_quantity_view(request, product_id):
+    """
+    PATCH /api/cart/<product_id>/quantity/
+    Body: { "quantity": 3 }
+
+    Requirement 1 demo endpoint:
+    exposes update_cart_item_quantity(), which uses select_for_update()
+    to serialize concurrent exact-quantity updates for the same cart item.
+    """
+    err = _block_admin(request)
+    if err:
+        return err
+
+    try:
+        quantity = int(request.data.get("quantity", 1))
+    except (TypeError, ValueError):
+        return Response({"error": "quantity must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        item = services.update_cart_item_quantity(request.user, product_id, quantity)
+    except ValueError as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+
+    if item is None:
+        return Response({"deleted": True}, status=status.HTTP_200_OK)
+
+    return Response(CartItemSerializer(item).data, status=status.HTTP_200_OK)
+
+
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def clear_cart_view(request):

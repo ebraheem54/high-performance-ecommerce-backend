@@ -146,7 +146,7 @@ def create_order_from_cart(user) -> Order:
 
 
 @transaction.atomic
-def process_payment(order_id: int, method: str, transaction_id: str = "") -> Payment:
+def process_payment(order_id: int, method: str, transaction_id: str = "", user=None) -> Payment:
     """
     Mark the payment as completed.
     PESSIMISTIC LOCKING
@@ -160,12 +160,17 @@ def process_payment(order_id: int, method: str, transaction_id: str = "") -> Pay
     """
     # ── Lock order row FIRST, then payment — consistent lock ordering ─────────
     order = Order.objects.select_for_update().get(id=order_id)
+    if user is not None and not user.is_staff and order.user_id != user.id:
+        raise Order.DoesNotExist
     payment = Payment.objects.select_for_update().get(order_id=order_id)
 
     logger.info(
         "Pessimistic locks acquired on Order=%s and Payment for order=%s",
         order_id, order_id,
     )
+
+    if order.status == Order.Status.CANCELLED:
+        raise ValueError("Cannot process payment for a cancelled order.")
 
     if payment.status == Payment.Status.COMPLETED:
         raise ValueError("Payment already completed.")

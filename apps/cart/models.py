@@ -6,7 +6,7 @@ CartItem holds products a user intends to buy.
 from django.conf import settings
 from django.db import models
 
-    
+
 class CartItem(models.Model):
     """
     A product in a user's shopping cart.

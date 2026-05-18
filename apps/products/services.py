@@ -195,7 +195,8 @@ def create_review(
       Reviews are infrequent writes. A DB-level lock on the review table
       is expensive and unnecessary. Version-check is sufficient.
     """
-    from products.models import Review
+    from django.db import IntegrityError
+    from apps.products.models import Review
 
     try:
         with transaction.atomic():
@@ -213,15 +214,11 @@ def create_review(
                 rating,
             )
             return review
-    except Exception as exc:
-        from django.db import IntegrityError
-
-        if "unique" in str(exc).lower():
-            raise ValueError(
-                "You have already reviewed this product. "
-                "Each user can only submit one review per product."
-            ) from exc
-        raise
+    except IntegrityError as exc:
+        raise ValueError(
+            "You have already reviewed this product. "
+            "Each user can only submit one review per product."
+        ) from exc
 
 
 @transaction.atomic

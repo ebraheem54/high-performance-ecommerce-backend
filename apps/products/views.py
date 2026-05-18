@@ -10,9 +10,12 @@ from __future__ import annotations
 from typing import Any
 
 from django.core.cache import cache
+from django.db import IntegrityError
 from django.db.models import QuerySet
+from django.utils import timezone
 from rest_framework import generics
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import BasePermission
 from rest_framework.permissions import (
     IsAuthenticated,
@@ -22,7 +25,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from apps.products import services
-from apps.products.models import Product, Review
+from apps.products.models import Product, Review, OrderLock
 from apps.products.serializers import (
     ProductSerializer,
     ProductDetailSerializer,
@@ -114,6 +117,122 @@ def restock_view(request: Request, product_id: int) -> Response:
     return Response(ProductDetailSerializer(product).data)
 
 
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def reserve_product_view(request: Request, product_id: int) -> Response:
+    """
+    POST /api/products/<id>/reserve/
+    Body: { "quantity": 1, "lock_minutes": 10 }
+
+    Requirement 1 demo endpoint:
+    exposes create_order_lock(), which locks the Product row with
+    select_for_update() while creating a temporary reservation.
+    """
+    if request.user.is_staff:
+        return Response({"error": "Admins cannot reserve products."}, status=403)
+
+    try:
+        quantity = int(request.data.get("quantity", 1))
+        lock_minutes = int(request.data.get("lock_minutes", 10))
+        if quantity <= 0 or lock_minutes <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return Response(
+            {"error": "quantity and lock_minutes must be positive integers."},
+            status=400,
+        )
+
+    try:
+        lock = services.create_order_lock(product_id, request.user.id, quantity, lock_minutes)
+    except Product.DoesNotExist:
+        return Response({"error": "Product not found."}, status=404)
+    except ValueError as exc:
+        return Response({"error": str(exc)}, status=400)
+
+    return Response(
+        {
+            "lock_id": lock.id,
+            "product_id": product_id,
+            "quantity": lock.quantity,
+            "expires_at": lock.expires_at,
+            "_demo": "Pessimistic product reservation via select_for_update().",
+        },
+        status=201,
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def reserve_product_unsafe_view(request: Request, product_id: int) -> Response:
+    """
+    POST /api/products/<id>/reserve-unsafe/
+
+    DEMO ONLY — Requirement 1 BEFORE state.
+    Intentionally creates reservations without select_for_update().
+    Concurrent users can over-reserve the same product because each request
+    reads stale stock/reservation state before creating its lock.
+    """
+    if request.user.is_staff:
+        return Response({"error": "Admins cannot reserve products."}, status=403)
+
+    try:
+        quantity = int(request.data.get("quantity", 1))
+        lock_minutes = int(request.data.get("lock_minutes", 10))
+        if quantity <= 0 or lock_minutes <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return Response(
+            {"error": "quantity and lock_minutes must be positive integers."},
+            status=400,
+        )
+
+    try:
+        product = Product.objects.get(id=product_id, is_active=True)
+    except Product.DoesNotExist:
+        return Response({"error": "Product not found."}, status=404)
+
+    active_reserved = sum(
+        lock.quantity
+        for lock in OrderLock.objects.filter(
+            product_id=product_id,
+            expires_at__gt=timezone.now(),
+        )
+    )
+
+    from datetime import timedelta
+    import time as _time
+
+    _time.sleep(0.10)
+    lock = OrderLock.objects.create(
+        product=product,
+        user=request.user,
+        quantity=quantity,
+        expires_at=timezone.now() + timedelta(minutes=lock_minutes),
+    )
+
+    actual_reserved = sum(
+        current_lock.quantity
+        for current_lock in OrderLock.objects.filter(
+            product_id=product_id,
+            expires_at__gt=timezone.now(),
+        )
+    )
+
+    return Response(
+        {
+            "lock_id": lock.id,
+            "product_id": product_id,
+            "quantity": lock.quantity,
+            "stock": product.stock,
+            "snapshot_reserved": active_reserved,
+            "actual_reserved": actual_reserved,
+            "over_reserved": actual_reserved > product.stock,
+            "warning": "NO LOCKING — unsafe reservation demo endpoint",
+        },
+        status=201,
+    )
+
+
 class ProductReviewListView(generics.ListCreateAPIView):
     """
     GET  /api/products/<id>/reviews/  — any authenticated user
@@ -127,10 +246,15 @@ class ProductReviewListView(generics.ListCreateAPIView):
         return Review.objects.filter(product_id=self.kwargs["product_id"])
 
     def perform_create(self, serializer: Any) -> None:
-        serializer.save(
-            user=self.request.user,
-            product_id=self.kwargs["product_id"],
-        )
+        try:
+            serializer.save(
+                user=self.request.user,
+                product_id=self.kwargs["product_id"],
+            )
+        except IntegrityError as exc:
+            raise ValidationError({
+                "error": "You have already reviewed this product. Each user can only submit one review per product."
+            }) from exc
 
 
 class InventoryLogListView(generics.ListAPIView):

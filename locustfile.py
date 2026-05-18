@@ -112,6 +112,8 @@ VALID_MODES = {
     "normal",
     "browsing",
     "race_before",
+    "race1_before",
+    "race1_after",
     "req3_sync",
     "req3_async",
     "req4_before",
@@ -153,6 +155,21 @@ AUTO_TRIGGER_BATCH_ON_START = os.getenv("AUTO_TRIGGER_BATCH_ON_START", "false").
 req1_success = 0
 req1_stock_out = 0
 
+# REQ 1 — detailed per-case counters (race1_before / race1_after modes)
+race1_counts = {
+    "case1_oversell"       : 0,   # stock went negative — race condition proven
+    "case1_checkout_ok"    : 0,   # safe checkout succeeded (HTTP 201)
+    "case1_stockout"       : 0,   # correctly blocked — not enough stock (HTTP 400)
+    "case2_wallet_ok"      : 0,   # wallet checkout queued successfully (HTTP 202)
+    "case2_wallet_blocked" : 0,   # insufficient balance — lock prevented double-spend
+    "case3_payment_ok"     : 0,   # first payment processed (HTTP 200)
+    "case3_payment_blocked": 0,   # duplicate payment blocked (HTTP 400)
+    "case4_cancel_ok"      : 0,   # cancel succeeded (HTTP 200)
+    "case4_cancel_blocked" : 0,   # cancel rejected — wrong state (HTTP 400)
+    "case5_reserve_ok"     : 0,   # reservation acquired (HTTP 201)
+    "case5_reserve_blocked": 0,   # reservation blocked — insufficient stock (HTTP 400)
+}
+
 req2_total_requests = 0
 req2_errors = 0
 req2_capacity_times_ms: list = []
@@ -185,12 +202,14 @@ def on_test_start(environment, **kwargs):
 
     print(f"  LOCUST_MODE: {LOCUST_MODE}")
     print("  Active weights:")
-    print(f"    EcommerceUser          = {EcommerceUser.weight}")
-    print(f"    BrowsingUser           = {BrowsingUser.weight}")
-    print(f"    RaceConditionDemoUser  = {RaceConditionDemoUser.weight}")
-    print(f"    CapacityStressUser     = {CapacityStressUser.weight}")
-    print(f"    CheckoutSyncUser       = {CheckoutSyncUser.weight}")
-    print(f"    CheckoutAsyncUser      = {CheckoutAsyncUser.weight}")
+    print(f"    EcommerceUser              = {EcommerceUser.weight}")
+    print(f"    BrowsingUser               = {BrowsingUser.weight}")
+    print(f"    RaceConditionDemoUser      = {RaceConditionDemoUser.weight}")
+    print(f"    Race1OversellingBeforeUser = {Race1OversellingBeforeUser.weight}")
+    print(f"    Race1SafeUser              = {Race1SafeUser.weight}")
+    print(f"    CapacityStressUser         = {CapacityStressUser.weight}")
+    print(f"    CheckoutSyncUser           = {CheckoutSyncUser.weight}")
+    print(f"    CheckoutAsyncUser          = {CheckoutAsyncUser.weight}")
     print("")
 
     if LOCUST_MODE == "req2":
@@ -300,9 +319,59 @@ def on_test_stop(environment, **kwargs):
 
     print(f"Mode: {LOCUST_MODE}")
 
-    print("\nREQ 1 — Race Condition Safety")
-    print(f"  HOT product checkouts succeeded : {req1_success}")
-    print(f"  Stock-outs blocked by locking   : {req1_stock_out}")
+    print("\nREQ 1 — Race Condition Safety (5 Cases)")
+    print(f"  [General] HOT checkouts via EcommerceUser succeeded : {req1_success}")
+    print(f"  [General] Stock-outs blocked                        : {req1_stock_out}")
+
+    if LOCUST_MODE in ("race1_before", "race1_after"):
+        print("")
+        print("  CASE 1 — Concurrent Checkout / Overselling")
+        print("    BEFORE endpoint : POST /api/orders/race-demo/  (no lock, 100ms sleep → stock < 0)")
+        print("    AFTER  endpoint : POST /api/orders/checkout/   (SELECT FOR UPDATE on product rows)")
+        print(f"    Oversell events (stock<0)     : {race1_counts['case1_oversell']}")
+        print(f"    Safe checkout ok (201)        : {race1_counts['case1_checkout_ok']}")
+        print(f"    Correctly blocked (400)       : {race1_counts['case1_stockout']}")
+        if race1_counts["case1_oversell"] > 0:
+            print("    ⚠  RACE CONDITION PROVEN — stock went negative without locking")
+        elif race1_counts["case1_checkout_ok"] > 0:
+            print("    ✅ PROTECTED — pessimistic lock prevented overselling")
+
+        print("")
+        print("  CASE 2 — Wallet Checkout / Double Spend")
+        print("    BEFORE endpoint : POST /api/orders/blocking-wallet-checkout/")
+        print("    AFTER  endpoint : POST /api/orders/checkout-wallet-async/")
+        print("    Scenario : concurrent wallet checkouts — user row locked to prevent double spend")
+        print(f"    Queued (202)                  : {race1_counts['case2_wallet_ok']}")
+        print(f"    Blocked — low balance (400)   : {race1_counts['case2_wallet_blocked']}")
+
+        print("")
+        print("  CASE 3 — Double Payment Processing")
+        print("    BEFORE endpoint : POST /api/orders/<id>/process-payment-unsafe/ twice")
+        print("    AFTER  endpoint : POST /api/orders/<id>/process-payment/ twice after safe order")
+        print("    Scenario : same customer tries to pay the same order twice — order+payment rows locked")
+        print(f"    First payment ok (200)        : {race1_counts['case3_payment_ok']}")
+        print(f"    Duplicate blocked (400)       : {race1_counts['case3_payment_blocked']}")
+        if race1_counts["case3_payment_blocked"] > 0:
+            print("    ✅ PROTECTED — double payment prevented by pessimistic lock")
+
+        print("")
+        print("  CASE 4 — Cancel Order While Payment Is Processing")
+        print("    BEFORE endpoint : POST /api/orders/<id>/cancel-unsafe/ after payment attempt")
+        print("    AFTER  endpoint : POST /api/orders/<id>/cancel/ after safe order/payment attempt")
+        print("    Scenario : cancel races with payment — order row lock and state machine enforced")
+        print(f"    Cancel ok (200)               : {race1_counts['case4_cancel_ok']}")
+        print(f"    Blocked — wrong state (400)   : {race1_counts['case4_cancel_blocked']}")
+
+        print("")
+        print("  CASE 5 — Product Reservation / Over-Reservation")
+        print("    BEFORE endpoint : POST /api/products/<id>/reserve-unsafe/  (no product row lock)")
+        print("    AFTER  endpoint : POST /api/products/<id>/reserve/         (SELECT FOR UPDATE)")
+        print("    Scenario : concurrent reservations for same product — unsafe over-reserves, safe blocks")
+        print(f"    Reservation ok (201)          : {race1_counts['case5_reserve_ok']}")
+        if LOCUST_MODE == "race1_before":
+            print(f"    Over-reserved / blocked count : {race1_counts['case5_reserve_blocked']}")
+        else:
+            print(f"    Blocked — low stock (400)     : {race1_counts['case5_reserve_blocked']}")
 
     print("\nREQ 2 — Resource Management & Capacity Control")
     print(f"  Total requests : {req2_total_requests}")
@@ -369,7 +438,6 @@ def on_test_stop(environment, **kwargs):
     if not req4_naive_times_ms and not req4_chunked_times_ms and not req4_triggered:
         print("  ℹ Run with LOCUST_MODE=req4_before or req4_after to test batch processing")
 
-    print("\nREQ 6 — Distributed Caching")
     if req6_first_hit_times and req6_cache_hit_times:
         avg_f = sum(req6_first_hit_times) / len(req6_first_hit_times)
         avg_c = sum(req6_cache_hit_times) / len(req6_cache_hit_times)
@@ -402,6 +470,13 @@ def _incr(name: str, delta: int = 1):
             req2_total_requests += delta
         elif name == "req2_err":
             req2_errors += delta
+
+
+def _race1_incr(key: str, delta: int = 1):
+    """Thread-safe counter for REQ 1 per-case metrics."""
+    with _lock:
+        if key in race1_counts:
+            race1_counts[key] += delta
 
 
 def _record(name: str, value: float):
@@ -646,7 +721,7 @@ class BrowsingUser(HttpUser):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CLASS 3 — RaceConditionDemoUser
+# CLASS 3 — RaceConditionDemoUser  (original race_before mode — unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class RaceConditionDemoUser(HttpUser):
@@ -670,13 +745,407 @@ class RaceConditionDemoUser(HttpUser):
             "/api/orders/race-demo/",
             json={"product_id": pid},
             headers={"Authorization": f"Token {self.token}"},
-            name="POST /api/orders/race-demo/ [NO LOCK]",
+            name="Before | POST /api/orders/race-demo/",
             catch_response=True,
         ) as resp:
             if resp.status_code in (201, 409):
                 resp.success()
             else:
                 resp.failure(f"Unexpected {resp.status_code}: {resp.text[:100]}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLASS 3a — Race1OversellingBeforeUser  (LOCUST_MODE=race1_before)
+#
+# REQ 1 — CASE 1 BEFORE: Concurrent Checkout / Overselling
+#
+# Endpoint : POST /api/orders/race-demo/
+# Scenario : All concurrent users buy the same hot product simultaneously.
+#            No lock is held. Each user reads a stale stock snapshot, sleeps
+#            100ms (all piled up at the same point), then decrements stock.
+# Expected : oversell=true in response body — stock goes negative.
+# Report   : race1_counts["case1_oversell"] incremented for every oversell.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class Race1BaseUser(HttpUser):
+    """Shared Req 1 setup for customer-driven race-condition cases."""
+
+    abstract = True
+    wait_time = between(0.05, 0.2)
+    weight = 0
+    mode_label = "Req1"
+    login_label = "race1"
+
+    def on_start(self):
+        self.token = _login(
+            self.client,
+            LOCUST_EMAIL_TPL.format(i=random.randint(1, LOCUST_USER_COUNT)),
+            LOCUST_PASSWORD,
+            f"[{self.login_label}]",
+        )
+
+    def _h(self):
+        return {"Authorization": f"Token {self.token}"} if self.token else {}
+
+    def _hot_product_id(self):
+        ids = HOT_PRODUCT_IDS or ALL_PRODUCT_IDS
+        return ids[0] if ids else None
+
+    def _normal_product_id(self):
+        return random.choice(ALL_PRODUCT_IDS) if ALL_PRODUCT_IDS else None
+
+    def _clear_cart_setup(self) -> None:
+        """Clear cart outside Locust stats so setup noise stays out of Req 1 rows."""
+        if not self.token:
+            return
+        try:
+            _requests.delete(
+                f"{self.client.base_url}/api/cart/clear/",
+                headers=self._h(),
+                timeout=10,
+            )
+        except Exception as exc:
+            print(f"  [WARN] Req1 setup cart clear failed: {exc}")
+
+    def _add_product_to_cart(self, product_id: int, quantity: int = 1) -> bool:
+        self._clear_cart_setup()
+        with self.client.post(
+            "/api/cart/add/",
+            json={"product_id": product_id, "quantity": quantity},
+            headers=self._h(),
+            name=f"{self.mode_label} Setup | POST /api/cart/add/",
+            catch_response=True,
+        ) as resp:
+            if resp.status_code in (200, 201):
+                resp.success()
+                return True
+            resp.failure(f"Cart add failed: {resp.status_code} {resp.text[:120]}")
+            return False
+
+    def _safe_checkout_one_item(self, product_id: int | None = None) -> int | None:
+        if not self.token:
+            return None
+        pid = product_id or self._normal_product_id()
+        if not pid or not self._add_product_to_cart(pid):
+            return None
+        with self.client.post(
+            "/api/orders/checkout/",
+            json={},
+            headers=self._h(),
+            name=f"{self.mode_label} Case 1 AFTER | POST /api/orders/checkout/ (locked checkout)",
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 201:
+                _race1_incr("case1_checkout_ok")
+                resp.success()
+                return resp.json().get("id")
+            if resp.status_code in (400, 409):
+                _race1_incr("case1_stockout")
+                resp.success()
+                return None
+            resp.failure(f"Locked checkout failed: {resp.status_code} {resp.text[:120]}")
+            return None
+
+    def _unsafe_checkout_one_item(self, product_id: int | None = None) -> int | None:
+        if not self.token:
+            return None
+        pid = product_id or self._hot_product_id()
+        if not pid:
+            return None
+        with self.client.post(
+            "/api/orders/race-demo/",
+            json={"product_id": pid},
+            headers=self._h(),
+            name=f"{self.mode_label} Case 1 BEFORE | POST /api/orders/race-demo/ (unsafe checkout)",
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 201:
+                data = resp.json()
+                if data.get("oversell"):
+                    _race1_incr("case1_oversell")
+                    resp.failure(f"OVERSELL: stock={data.get('actual_stock')} product={pid}")
+                else:
+                    _race1_incr("case1_checkout_ok")
+                    resp.success()
+                return data.get("order_id")
+            if resp.status_code in (400, 409):
+                _race1_incr("case1_stockout")
+                resp.success()
+                return None
+            resp.failure(f"Unsafe checkout failed: {resp.status_code} {resp.text[:120]}")
+            return None
+
+    def _process_payment_twice(self, order_id: int, prefix: str, unsafe: bool = False):
+        if not self.token:
+            return
+
+        endpoint = "process-payment-unsafe" if unsafe else "process-payment"
+        row_name = f"{prefix} | POST /api/orders/{{id}}/{endpoint}/"
+        with self.client.post(
+            f"/api/orders/{order_id}/{endpoint}/",
+            json={"method": "credit_card", "transaction_id": f"req1-{order_id}-1"},
+            headers=self._h(),
+            name=row_name,
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 200:
+                _race1_incr("case3_payment_ok")
+                resp.success()
+            elif resp.status_code == 400:
+                _race1_incr("case3_payment_blocked")
+                resp.success()
+            else:
+                resp.failure(f"First payment unexpected: {resp.status_code} {resp.text[:120]}")
+
+        with self.client.post(
+            f"/api/orders/{order_id}/{endpoint}/",
+            json={"method": "credit_card", "transaction_id": f"req1-{order_id}-2"},
+            headers=self._h(),
+            name=row_name,
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 400:
+                _race1_incr("case3_payment_blocked")
+                resp.success()
+            elif resp.status_code == 200:
+                if unsafe:
+                    resp.failure(f"409 Conflict: duplicate payment processed for order={order_id}")
+                else:
+                    resp.failure(f"Duplicate payment succeeded unexpectedly for order={order_id}")
+            else:
+                resp.failure(f"Duplicate payment unexpected: {resp.status_code} {resp.text[:120]}")
+
+    def _cancel_after_payment_attempt(self, order_id: int, prefix: str, unsafe: bool = False):
+        try:
+            _requests.post(
+                f"{self.client.base_url}/api/orders/{order_id}/process-payment/",
+                json={"method": "credit_card", "transaction_id": f"req1-cancel-race-{order_id}"},
+                headers=self._h(),
+                timeout=10,
+            )
+        except Exception as exc:
+            print(f"  [WARN] Req1 setup payment failed: {exc}")
+
+        endpoint = "cancel-unsafe" if unsafe else "cancel"
+        with self.client.post(
+            f"/api/orders/{order_id}/{endpoint}/",
+            json={},
+            headers=self._h(),
+            name=f"{prefix} | POST /api/orders/{{id}}/{endpoint}/",
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 200:
+                data = resp.json()
+                if unsafe and data.get("paid_and_cancelled"):
+                    _race1_incr("case4_cancel_blocked")
+                    resp.failure(f"409 Conflict: paid order was cancelled order={order_id}")
+                else:
+                    _race1_incr("case4_cancel_ok")
+                    resp.success()
+            elif resp.status_code == 400:
+                _race1_incr("case4_cancel_blocked")
+                if prefix.startswith("Req1 BEFORE"):
+                    resp.failure("409 Conflict: cancel lost race with payment processing")
+                else:
+                    resp.success()
+            else:
+                resp.failure(f"Cancel unexpected: {resp.status_code} {resp.text[:120]}")
+
+
+class Race1OversellingBeforeUser(Race1BaseUser):
+    mode_label = "Req1 BEFORE"
+    login_label = "race1-before"
+
+    @task(3)
+    def case1_concurrent_checkout_overselling(self):
+        """Case 1 before: unsafe checkout can oversell stock."""
+        self._unsafe_checkout_one_item(self._hot_product_id())
+
+    @task(2)
+    def case2_wallet_checkout_double_spend(self):
+        """Case 2: wallet checkout endpoint exercises user-row balance locking."""
+        if not self.token:
+            return
+        pid = self._normal_product_id()
+        if not pid or not self._add_product_to_cart(pid):
+            return
+        with self.client.post(
+            "/api/orders/blocking-wallet-checkout/",
+            json={},
+            headers=self._h(),
+            name="Req1 BEFORE Case 2 | POST /api/orders/blocking-wallet-checkout/ (wallet double-spend)",
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 201:
+                _race1_incr("case2_wallet_ok")
+                resp.success()
+            elif resp.status_code in (400, 409):
+                _race1_incr("case2_wallet_blocked")
+                resp.failure("409 Conflict: wallet double-spend race blocked")
+            else:
+                resp.failure(f"Wallet checkout unexpected: {resp.status_code} {resp.text[:120]}")
+
+    @task(2)
+    def case3_double_payment_processing(self):
+        """Case 3: first customer payment succeeds, duplicate payment is blocked."""
+        order_id = self._unsafe_checkout_one_item(self._normal_product_id())
+        if order_id:
+            self._process_payment_twice(
+                order_id,
+                "Req1 BEFORE Case 3 double payment",
+                unsafe=True,
+            )
+
+    @task(1)
+    def case4_cancel_while_payment_processing(self):
+        """Case 4: cancel races with payment/state transition."""
+        order_id = self._unsafe_checkout_one_item(self._normal_product_id())
+        if order_id:
+            self._cancel_after_payment_attempt(
+                order_id,
+                "Req1 BEFORE Case 4 cancel while payment processing",
+                unsafe=True,
+            )
+
+    @task(2)
+    def case5_product_reservation_over_reservation(self):
+        """Case 5: product reservation targets the same low-stock product."""
+        if not self.token:
+            return
+        pid = self._hot_product_id()
+        if not pid:
+            return
+        with self.client.post(
+            f"/api/products/{pid}/reserve-unsafe/",
+            json={"quantity": 1, "lock_minutes": 5},
+            headers=self._h(),
+            name="Req1 BEFORE Case 5 | POST /api/products/{id}/reserve-unsafe/ (over-reservation)",
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 201:
+                data = resp.json()
+                if data.get("over_reserved"):
+                    _race1_incr("case5_reserve_blocked")
+                    resp.failure(
+                        f"OVER-RESERVED: reserved={data.get('actual_reserved')} stock={data.get('stock')}"
+                    )
+                else:
+                    _race1_incr("case5_reserve_ok")
+                    resp.success()
+            elif resp.status_code == 400:
+                _race1_incr("case5_reserve_blocked")
+                resp.success()
+            else:
+                resp.failure(f"Reserve unexpected: {resp.status_code} {resp.text[:120]}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLASS 3b — Race1SafeUser  (LOCUST_MODE=race1_after)
+#
+# REQ 1 — CASES 1-5 AFTER: All race conditions handled by protected endpoints.
+#
+# CASE 1 — Concurrent Checkout / Overselling
+#   Endpoint : POST /api/orders/checkout/  (SELECT FOR UPDATE on product rows)
+#   Expected : HTTP 201 or 400 (stock-out). Stock never negative.
+#
+# CASE 2 — Wallet Checkout / Double Spend
+#   Endpoint : POST /api/orders/checkout-wallet-async/
+#   Expected : HTTP 202 (queued) or 400 (insufficient balance).
+#              User row locked atomically — no double spend possible.
+#
+# CASE 3 — Double Payment Processing
+#   Endpoint : POST /api/orders/<id>/process-payment/  (owning customer)
+#   Scenario : Customer calls process-payment twice on the same order.
+#   Expected : First call HTTP 200; second call HTTP 400 "Payment already completed".
+#
+# CASE 4 — Cancel Order While Payment Is Processing
+#   Endpoint : POST /api/orders/<id>/cancel/
+#   Scenario : Cancel attempted after checkout. Order row locked by
+#              select_for_update() — only valid state transitions pass.
+#   Expected : HTTP 200 if PENDING/CONFIRMED; HTTP 400 if PROCESSING/CANCELLED.
+#
+# CASE 5 — Product Reservation / Over-Reservation
+#   Endpoint : POST /api/products/<id>/reserve/
+#   Expected : HTTP 201 if stock available; HTTP 400 if insufficient.
+#              Product row locked — concurrent over-reservation impossible.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class Race1SafeUser(Race1BaseUser):
+    mode_label = "Req1 AFTER"
+    login_label = "race1-after"
+
+    @task(3)
+    def case1_concurrent_checkout_no_oversell(self):
+        """Case 1 after: locked checkout blocks overselling."""
+        self._safe_checkout_one_item(self._hot_product_id())
+
+    @task(2)
+    def case2_wallet_checkout_double_spend_blocked(self):
+        """Case 2 after: async wallet checkout queues work that uses wallet locking."""
+        if not self.token:
+            return
+        pid = self._normal_product_id()
+        if not pid or not self._add_product_to_cart(pid):
+            return
+        with self.client.post(
+            "/api/orders/checkout-wallet-async/",
+            json={},
+            headers=self._h(),
+            name="Req1 AFTER Case 2 | POST /api/orders/checkout-wallet-async/ (wallet double-spend protected)",
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 202:
+                _race1_incr("case2_wallet_ok")
+                resp.success()
+            elif resp.status_code in (400, 409, 503):
+                _race1_incr("case2_wallet_blocked")
+                resp.success()
+            else:
+                resp.failure(f"Wallet checkout unexpected: {resp.status_code} {resp.text[:120]}")
+
+    @task(2)
+    def case3_double_payment_processing_blocked(self):
+        """Case 3 after: payment endpoint locks order and payment rows."""
+        order_id = self._safe_checkout_one_item(self._normal_product_id())
+        if order_id:
+            self._process_payment_twice(
+                order_id,
+                "Req1 AFTER Case 3 double payment",
+            )
+
+    @task(1)
+    def case4_cancel_while_payment_processing_blocked(self):
+        """Case 4 after: order state lock prevents invalid cancel/payment races."""
+        order_id = self._safe_checkout_one_item(self._normal_product_id())
+        if order_id:
+            self._cancel_after_payment_attempt(
+                order_id,
+                "Req1 AFTER Case 4 cancel while payment processing",
+            )
+
+    @task(2)
+    def case5_product_reservation_over_reservation_blocked(self):
+        """Case 5 after: reservation uses product-row locking."""
+        if not self.token:
+            return
+        pid = self._hot_product_id()
+        if not pid:
+            return
+        with self.client.post(
+            f"/api/products/{pid}/reserve/",
+            json={"quantity": 1, "lock_minutes": 5},
+            headers=self._h(),
+            name="Req1 AFTER Case 5 | POST /api/products/{id}/reserve/ (over-reservation protected)",
+            catch_response=True,
+        ) as resp:
+            if resp.status_code == 201:
+                _race1_incr("case5_reserve_ok")
+                resp.success()
+            elif resp.status_code == 400:
+                _race1_incr("case5_reserve_blocked")
+                resp.success()
+            else:
+                resp.failure(f"Reserve unexpected: {resp.status_code} {resp.text[:120]}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -977,6 +1446,8 @@ def _apply_mode_weights():
         EcommerceUser,
         BrowsingUser,
         RaceConditionDemoUser,
+        Race1OversellingBeforeUser,
+        Race1SafeUser,
         CapacityStressUser,
         CheckoutSyncUser,
         CheckoutAsyncUser,
@@ -996,6 +1467,10 @@ def _apply_mode_weights():
         BrowsingUser.weight = 1
     elif LOCUST_MODE == "race_before":
         RaceConditionDemoUser.weight = 1
+    elif LOCUST_MODE == "race1_before":
+        Race1OversellingBeforeUser.weight = 1
+    elif LOCUST_MODE == "race1_after":
+        Race1SafeUser.weight = 1
     elif LOCUST_MODE == "req3_sync":
         CheckoutSyncUser.weight = 1
     elif LOCUST_MODE == "req3_async":

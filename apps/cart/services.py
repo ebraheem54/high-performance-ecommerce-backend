@@ -164,10 +164,21 @@ def add_to_cart(user, product_id: int, quantity: int = 1) -> CartItem:
     )
 
 
+@transaction.atomic
 def remove_from_cart(user, product_id: int) -> bool:
-    """Remove a product from the cart. Returns True if deleted."""
-    deleted, _ = CartItem.objects.filter(user=user, product_id=product_id).delete()
-    return deleted > 0
+    """
+    Remove a product from the cart using Pessimistic Locking.
+
+    Locking the row before deletion serializes delete vs exact-quantity update
+    requests for the same cart item.
+    """
+    try:
+        item = CartItem.objects.select_for_update().get(user=user, product_id=product_id)
+    except CartItem.DoesNotExist:
+        return False
+
+    item.delete()
+    return True
 
 
 def clear_cart(user) -> int:

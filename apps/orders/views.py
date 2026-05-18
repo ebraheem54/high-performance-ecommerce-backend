@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 
 from apps.orders import services
-from apps.orders.models import Order
+from apps.orders.models import Order, Payment
 from apps.orders.serializers import OrderSerializer, OrderListSerializer
 
 
@@ -194,6 +194,121 @@ def cancel_order_view(request, order_id):
         pass
 
     return Response(OrderSerializer(order).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def cancel_order_unsafe_view(request, order_id):
+    """
+    POST /api/orders/<id>/cancel-unsafe/
+
+    DEMO ONLY — Requirement 1 BEFORE state.
+    Intentionally does not lock the order row and does not enforce the order
+    state machine. This can create an invalid paid-and-cancelled state.
+    """
+    import time as _time
+
+    try:
+        order = Order.objects.get(id=order_id)
+        if not request.user.is_staff and order.user_id != request.user.id:
+            raise Order.DoesNotExist
+    except Order.DoesNotExist:
+        return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    previous_status = order.status
+    payment_status = getattr(getattr(order, "payment", None), "status", None)
+
+    _time.sleep(0.10)
+    order.status = Order.Status.CANCELLED
+    order.save(update_fields=["status", "updated_at"])
+
+    return Response({
+        "order_id": order.id,
+        "previous_status": previous_status,
+        "order_status": order.status,
+        "payment_status": payment_status,
+        "paid_and_cancelled": payment_status == Payment.Status.COMPLETED,
+        "warning": "NO LOCKING — unsafe cancel demo endpoint",
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def process_payment_view(request, order_id):
+    """
+    POST /api/orders/<order_id>/process-payment/
+    Customer: process payment for their own order only.
+    Admin: process payment for any order.
+    Body: { "method": "credit_card", "transaction_id": "demo-123" }
+
+    Requirement 1 demo endpoint:
+    exposes process_payment(), which locks both Order and Payment rows with
+    select_for_update() to prevent double payment processing.
+    """
+    method = request.data.get("method", "credit_card")
+    transaction_id = request.data.get("transaction_id", "")
+
+    try:
+        payment = services.process_payment(order_id, method, transaction_id, request.user)
+    except Order.DoesNotExist:
+        return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response({
+        "order_id": order_id,
+        "payment_id": payment.id,
+        "payment_status": payment.status,
+        "method": payment.method,
+        "transaction_id": payment.transaction_id,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def process_payment_unsafe_view(request, order_id):
+    """
+    POST /api/orders/<order_id>/process-payment-unsafe/
+
+    DEMO ONLY — Requirement 1 BEFORE state.
+    Intentionally does not lock Order/Payment rows and does not block an
+    already-completed payment. This simulates a duplicate charge bug.
+    """
+    import time as _time
+
+    method = request.data.get("method", "credit_card")
+    transaction_id = request.data.get("transaction_id", "")
+
+    try:
+        order = Order.objects.get(id=order_id)
+        if not request.user.is_staff and order.user_id != request.user.id:
+            raise Order.DoesNotExist
+        payment = Payment.objects.get(order_id=order_id)
+    except Order.DoesNotExist:
+        return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+    except Payment.DoesNotExist:
+        return Response({"error": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    was_completed = payment.status == Payment.Status.COMPLETED
+    _time.sleep(0.10)
+
+    payment.status = Payment.Status.COMPLETED
+    payment.method = method
+    payment.transaction_id = transaction_id
+    payment.save(update_fields=["status", "method", "transaction_id", "updated_at"])
+
+    order.status = Order.Status.PROCESSING
+    order.save(update_fields=["status", "updated_at"])
+
+    return Response({
+        "order_id": order_id,
+        "payment_id": payment.id,
+        "payment_status": payment.status,
+        "method": payment.method,
+        "transaction_id": payment.transaction_id,
+        "duplicate_processed": was_completed,
+        "warning": "NO LOCKING — unsafe duplicate payment demo endpoint",
+    }, status=status.HTTP_200_OK)
 
 
 # ─────────────────────────────────────────────
