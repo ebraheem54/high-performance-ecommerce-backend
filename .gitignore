@@ -47,3 +47,10 @@ EOF
 .env
 .env.local
 .env.*.local
+
+# JMeter local outputs
+jmeter.log
+req9_jmeter/results/
+req9_jmeter/users.csv
+req9_jmeter/Req9 Full-System Stress Test - Optimized AFTER State.jmx
+locustfile1.py

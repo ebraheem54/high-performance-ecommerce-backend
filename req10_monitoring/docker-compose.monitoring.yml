@@ -1,0 +1,102 @@
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: req10_prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - app-network
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: req10_grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - monitoring
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: req10_cadvisor
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "8085:8080"
+    networks:
+      - monitoring
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: req10_node_exporter
+    restart: unless-stopped
+    command:
+      - "--path.rootfs=/host"
+    volumes:
+      - /:/host:ro,rslave
+    ports:
+      - "9100:9100"
+    networks:
+      - monitoring
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    container_name: req10_postgres_exporter
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${DB_USER:-ecommerce_user}:${DB_PASSWORD:-1234}@db:5432/${DB_NAME:-ecommerce_db}?sslmode=disable"
+    ports:
+      - "9187:9187"
+    networks:
+      - app-network
+      - monitoring
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    container_name: req10_redis_exporter
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+    ports:
+      - "9121:9121"
+    networks:
+      - app-network
+      - monitoring
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  monitoring:
+    driver: bridge
+  app-network:
+    external: true
+    name: ${APP_NETWORK_NAME:-parallelprogrammingproject_ecommerce-network}
