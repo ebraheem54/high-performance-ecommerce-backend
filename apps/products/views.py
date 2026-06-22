@@ -49,6 +49,7 @@ from apps.products.serializers import (
     InventoryLogSerializer,
     ReviewSerializer,
 )
+from apps.core.logging_utils import log_user_event
 
 TOP_SELLING_PRODUCTS_LIMIT = 10
 REQ7_MODES = {"before", "after"}
@@ -532,12 +533,26 @@ class ProductReviewListView(generics.ListCreateAPIView):
     def perform_create(self, serializer: Any) -> None:
         product_id = self.kwargs["product_id"]
         try:
-            serializer.save(
+            review = serializer.save(
                 user=self.request.user,
                 product_id=product_id,
             )
             invalidate_rating_summary_cache(product_id)
+            log_user_event(
+                self.request.user.id,
+                "review.create",
+                product_id=product_id,
+                review_id=review.id,
+                rating=review.rating,
+                result="created",
+            )
         except IntegrityError as exc:
+            log_user_event(
+                self.request.user.id,
+                "review.create",
+                product_id=product_id,
+                result="duplicate_rejected",
+            )
             raise ValidationError({
                 "error": "You have already reviewed this product. Each user can only submit one review per product."
             }) from exc

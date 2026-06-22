@@ -19,6 +19,7 @@ from apps.cart.exceptions import ProductNotFoundError, OutOfStockError
 import logging
 import time
 from django.db import transaction
+from apps.core.logging_utils import log_user_event
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,15 @@ def _try_add_to_cart_optimistic(user, product_id: int, quantity: int):
             user.id, product_id, item.quantity,
             captured_version, captured_version + 1,
         )
+        log_user_event(
+            user.id,
+            "cart.add",
+            product_id=product_id,
+            quantity_added=quantity,
+            cart_quantity=item.quantity,
+            lock="optimistic",
+            result="updated",
+        )
         return item
 
     except CartItem.DoesNotExist:
@@ -109,26 +119,19 @@ def _try_add_to_cart_optimistic(user, product_id: int, quantity: int):
             "Cart item created: user=%s product=%s qty=%s",
             user.id, product_id, quantity,
         )
+        log_user_event(
+            user.id,
+            "cart.add",
+            product_id=product_id,
+            quantity_added=quantity,
+            cart_quantity=item.quantity,
+            lock="optimistic",
+            result="created",
+        )
         return item
 
 
 def add_to_cart(user, product_id: int, quantity: int = 1) -> CartItem:
-    """
-    Add a product to the cart or increase quantity if already present.
-
-    Uses OPTIMISTIC LOCKING with automatic retry.
-
-    Why Optimistic here?
-      Each user has their own cart rows — the probability of two requests
-      from the SAME user for the SAME product at the SAME millisecond is
-      very low.  Optimistic locking avoids a DB-level lock entirely and
-      gives higher throughput than pessimistic under normal load.
-      If conflict occurs (rare), we back off briefly and retry.
-
-    Resource Management (Requirement 2):
-      Exponential back-off (retry_delay * attempt) prevents a thundering
-      herd of retries from overloading the database.
-    """
     from django.db import IntegrityError
 
     last_error = None
@@ -175,15 +178,29 @@ def remove_from_cart(user, product_id: int) -> bool:
     try:
         item = CartItem.objects.select_for_update().get(user=user, product_id=product_id)
     except CartItem.DoesNotExist:
+        log_user_event(
+            user.id,
+            "cart.remove",
+            product_id=product_id,
+            result="not_found",
+        )
         return False
 
     item.delete()
+    log_user_event(
+        user.id,
+        "cart.remove",
+        product_id=product_id,
+        result="removed",
+        lock="pessimistic",
+    )
     return True
 
 
 def clear_cart(user) -> int:
     """Remove all items from the user's cart. Returns count deleted."""
     deleted, _ = CartItem.objects.filter(user=user).delete()
+    log_user_event(user.id, "cart.clear", deleted=deleted)
     return deleted
 
 
@@ -216,5 +233,12 @@ def update_cart_item_quantity(user, product_id: int, quantity: int) -> CartItem:
     logger.info(
         "Cart quantity set (pessimistic): user=%s product=%s qty=%s",
         user.id, product_id, quantity,
+    )
+    log_user_event(
+        user.id,
+        "cart.quantity_update",
+        product_id=product_id,
+        quantity=quantity,
+        lock="pessimistic",
     )
     return item

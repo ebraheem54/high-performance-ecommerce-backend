@@ -379,24 +379,6 @@
       networks:
         - ecommerce-network
 
-    # Flower - Celery monitoring dashboard
-    flower:
-      build:
-        context: .
-        args:
-          DEV: "true"
-      container_name: ecommerce_flower
-      restart: unless-stopped
-      env_file:
-        - .env
-      command: celery -A config flower --port=5555
-      ports:
-        - "5555:5555"
-      depends_on:
-        - redis
-      networks:
-        - ecommerce-network
-
     pgadmin:
       image: dpage/pgadmin4
       container_name: ecommerce_pgadmin

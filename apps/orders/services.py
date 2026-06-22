@@ -8,8 +8,10 @@ import time
 from django.db import transaction
 from django.utils import timezone
 from apps.orders.models import Order, OrderItem, Payment
+from apps.core.logging_utils import log_user_event
 
 logger = logging.getLogger(__name__)
+payment_logger = logging.getLogger("payments")
 
 
 
@@ -133,6 +135,15 @@ def create_order_from_cart(user) -> Order:
         "Order #%s created for user=%s total=%s (pessimistic checkout complete)",
         order.id, user.id, total,
     )
+    log_user_event(
+        user.id,
+        "order.checkout",
+        order_id=order.id,
+        total=total,
+        items=len(cart_items),
+        lock="pessimistic",
+        result="created",
+    )
 
     # ── Cache Invalidation (Requirement 6) ────────────────────────────────────
     # Stock changed → cached product list is now stale. Invalidate it so the
@@ -184,6 +195,24 @@ def process_payment(order_id: int, method: str, transaction_id: str = "", user=N
     order.save(update_fields=["status", "updated_at"])
 
     logger.info("Payment completed for order=%s method=%s", order_id, method)
+    payment_logger.info(
+        "payment.completed user=%s order_id=%s payment_id=%s method=%s transaction_id=%s",
+        order.user_id,
+        order_id,
+        payment.id,
+        method,
+        transaction_id,
+    )
+    log_user_event(
+        order.user_id,
+        "payment.process",
+        order_id=order_id,
+        payment_id=payment.id,
+        method=method,
+        status=payment.status,
+        lock="pessimistic",
+        result="completed",
+    )
     return payment
 
 
@@ -318,6 +347,15 @@ def checkout_with_wallet(user) -> Order:
         "Order #%s created for user=%s total=%s wallet_remaining=%s (wallet checkout)",
         order.id, locked_user.id, total, locked_user.wallet_balance,
     )
+    log_user_event(
+        locked_user.id,
+        "order.checkout_wallet",
+        order_id=order.id,
+        total=total,
+        wallet_remaining=locked_user.wallet_balance,
+        lock="pessimistic",
+        result="created",
+    )
     return order
 
 
@@ -350,6 +388,14 @@ def cancel_order(order_id: int, user=None) -> Order:
     order.status = Order.Status.CANCELLED
     order.save(update_fields=["status", "updated_at"])
     logger.info("Order #%s cancelled by user=%s", order_id, user)
+    log_user_event(
+        order.user_id,
+        "order.cancel",
+        order_id=order_id,
+        status=order.status,
+        lock="pessimistic",
+        result="cancelled",
+    )
     return order
 
 

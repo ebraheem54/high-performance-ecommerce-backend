@@ -19,6 +19,7 @@ from django.utils import timezone
 import time
 import logging
 from apps.products.models import Product, InventoryLog, OrderLock
+from apps.core.logging_utils import log_user_event
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,14 @@ def create_review(
                 product_id,
                 rating,
             )
+            log_user_event(
+                user.id,
+                "review.create",
+                product_id=product_id,
+                order_id=order_id,
+                rating=rating,
+                result="created",
+            )
             return review
     except IntegrityError as exc:
         raise ValueError(
@@ -266,6 +275,15 @@ def create_order_lock(product_id: int, user_id: int, quantity: int,
         user_id=user_id,
         quantity=quantity,
         expires_at=expires_at,
+    )
+    log_user_event(
+        user_id,
+        "product.reserve",
+        product_id=product_id,
+        quantity=quantity,
+        lock_id=lock.id,
+        lock="pessimistic",
+        result="reserved",
     )
     return lock
 

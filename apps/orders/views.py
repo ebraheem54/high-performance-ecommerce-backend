@@ -6,6 +6,8 @@ Permissions:
   - Admin   : view ALL orders, update status, cancel any order
 """
 
+import logging
+
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
@@ -14,6 +16,32 @@ from rest_framework.response import Response
 from apps.orders import services
 from apps.orders.models import Order, Payment
 from apps.orders.serializers import OrderSerializer, OrderListSerializer
+from apps.core.logging_utils import log_user_error, log_user_event, log_user_warning
+
+logger = logging.getLogger(__name__)
+
+
+def _log_order_issue(
+    request,
+    event: str,
+    response_status: int,
+    reason: str,
+    level: str = "warning",
+    **fields,
+) -> None:
+    user_id = getattr(request.user, "id", None)
+    log_message = (
+        "order_issue level=%s event=%s user=%s status=%s reason=%s fields=%s"
+    )
+    if level == "error":
+        logger.error(log_message, level, event, user_id, response_status, reason, fields)
+        log_user_error(user_id, event, status=response_status, reason=reason, **fields)
+    elif level == "info":
+        logger.info(log_message, level, event, user_id, response_status, reason, fields)
+        log_user_event(user_id, event, status=response_status, reason=reason, **fields)
+    else:
+        logger.warning(log_message, level, event, user_id, response_status, reason, fields)
+        log_user_warning(user_id, event, status=response_status, reason=reason, **fields)
 
 
 # Customer endpoints
@@ -54,6 +82,13 @@ def checkout_view(request):
     Customer only — converts cart into a confirmed order (ACID transaction).
     """
     if request.user.is_staff:
+        _log_order_issue(
+            request,
+            "order.checkout",
+            status.HTTP_403_FORBIDDEN,
+            "Admins cannot place orders.",
+            level="info",
+        )
         return Response(
             {"error": "Admins cannot place orders."},
             status=status.HTTP_403_FORBIDDEN,
@@ -61,8 +96,22 @@ def checkout_view(request):
     try:
         order = services.create_order_from_cart(request.user)
     except ValueError as e:
+        _log_order_issue(
+            request,
+            "order.checkout",
+            status.HTTP_400_BAD_REQUEST,
+            str(e),
+            level="warning",
+        )
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
+        _log_order_issue(
+            request,
+            "order.checkout",
+            status.HTTP_409_CONFLICT,
+            str(e),
+            level="warning",
+        )
         return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
 
     # ── Async Processing (Requirement 3) ─────────────────────────────────────
@@ -182,8 +231,24 @@ def cancel_order_view(request, order_id):
         user  = None if request.user.is_staff else request.user
         order = services.cancel_order(order_id, user)
     except Order.DoesNotExist:
+        _log_order_issue(
+            request,
+            "order.cancel",
+            status.HTTP_404_NOT_FOUND,
+            "Order not found.",
+            level="info",
+            order_id=order_id,
+        )
         return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
     except ValueError as e:
+        _log_order_issue(
+            request,
+            "order.cancel",
+            status.HTTP_400_BAD_REQUEST,
+            str(e),
+            level="warning",
+            order_id=order_id,
+        )
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     # Async cancellation email (Requirement 3) — fire-and-forget
@@ -251,8 +316,26 @@ def process_payment_view(request, order_id):
     try:
         payment = services.process_payment(order_id, method, transaction_id, request.user)
     except Order.DoesNotExist:
+        _log_order_issue(
+            request,
+            "payment.process",
+            status.HTTP_404_NOT_FOUND,
+            "Order not found.",
+            level="info",
+            order_id=order_id,
+        )
         return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
     except Exception as exc:
+        _log_order_issue(
+            request,
+            "payment.process",
+            status.HTTP_400_BAD_REQUEST,
+            str(exc),
+            level="warning",
+            order_id=order_id,
+            method=method,
+            transaction_id=transaction_id,
+        )
         return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
     return Response({

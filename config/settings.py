@@ -55,6 +55,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "apps.core.middleware.RequestTrackingMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -245,3 +246,184 @@ else:
     EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@ecommerce.dev")
+
+# ── Structured Log Files — Requirement 10 Monitoring Evidence ───────────────
+LOG_DIR = BASE_DIR / "logs"
+for _log_subdir in (
+    "cart",
+    "products",
+    "orders",
+    "payments",
+    "user_tracking",
+):
+    (LOG_DIR / _log_subdir).mkdir(parents=True, exist_ok=True)
+
+_LOG_FORMAT = (
+    "%(asctime)s level=%(levelname)s logger=%(name)s "
+    "module=%(module)s message=%(message)s"
+)
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "structured": {
+            "format": _LOG_FORMAT,
+        },
+        "structured_file": {
+            "format": _LOG_FORMAT + "\n",
+        },
+    },
+    "filters": {
+        "info_only": {
+            "()": "apps.core.logging_utils.MaxLevelFilter",
+            "max_level": "INFO",
+        },
+        "warning_only": {
+            "()": "apps.core.logging_utils.MaxLevelFilter",
+            "max_level": "WARNING",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "structured",
+        },
+        "cart_info": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "cart" / "info.log",
+            "formatter": "structured_file",
+            "level": "INFO",
+            "filters": ["info_only"],
+        },
+        "cart_errors": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "cart" / "errors.log",
+            "formatter": "structured_file",
+            "level": "ERROR",
+        },
+        "cart_warnings": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "cart" / "warnings.log",
+            "formatter": "structured_file",
+            "level": "WARNING",
+            "filters": ["warning_only"],
+        },
+        "products_info": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "products" / "info.log",
+            "formatter": "structured_file",
+            "level": "INFO",
+            "filters": ["info_only"],
+        },
+        "products_errors": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "products" / "errors.log",
+            "formatter": "structured_file",
+            "level": "ERROR",
+        },
+        "products_warnings": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "products" / "warnings.log",
+            "formatter": "structured_file",
+            "level": "WARNING",
+            "filters": ["warning_only"],
+        },
+        "orders_info": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "orders" / "info.log",
+            "formatter": "structured_file",
+            "level": "INFO",
+            "filters": ["info_only"],
+        },
+        "orders_errors": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "orders" / "errors.log",
+            "formatter": "structured_file",
+            "level": "ERROR",
+        },
+        "orders_warnings": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "orders" / "warnings.log",
+            "formatter": "structured_file",
+            "level": "WARNING",
+            "filters": ["warning_only"],
+        },
+        "payments_info": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "payments" / "info.log",
+            "formatter": "structured_file",
+            "level": "INFO",
+            "filters": ["info_only"],
+        },
+        "payments_errors": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "payments" / "errors.log",
+            "formatter": "structured_file",
+            "level": "ERROR",
+        },
+        "payments_warnings": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "payments" / "warnings.log",
+            "formatter": "structured_file",
+            "level": "WARNING",
+            "filters": ["warning_only"],
+        },
+        "user_tracking_info": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "user_tracking" / "info.log",
+            "formatter": "structured_file",
+            "level": "INFO",
+            "filters": ["info_only"],
+        },
+        "user_tracking_errors": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "user_tracking" / "errors.log",
+            "formatter": "structured_file",
+            "level": "ERROR",
+        },
+        "user_tracking_warnings": {
+            "class": "logging.FileHandler",
+            "filename": LOG_DIR / "user_tracking" / "warnings.log",
+            "formatter": "structured_file",
+            "level": "WARNING",
+            "filters": ["warning_only"],
+        },
+    },
+    "loggers": {
+        "apps.cart": {
+            "handlers": ["cart_info", "cart_warnings", "cart_errors", "console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "apps.products": {
+            "handlers": ["products_info", "products_warnings", "products_errors", "console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "apps.orders": {
+            "handlers": ["orders_info", "orders_warnings", "orders_errors", "console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "payments": {
+            "handlers": ["payments_info", "payments_warnings", "payments_errors", "console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "user_tracking": {
+            "handlers": [
+                "user_tracking_info",
+                "user_tracking_warnings",
+                "user_tracking_errors",
+                "console",
+            ],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "WARNING",
+    },
+}
