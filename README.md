@@ -1,8 +1,8 @@
 # High-Performance E-Commerce Backend
 
-A production-style e-commerce backend built with Django, Django REST Framework, PostgreSQL, Redis, Celery, Nginx, PgBouncer, Docker, and Locust.
+A production-style e-commerce backend built with Django, Django REST Framework, PostgreSQL, Redis, Celery, Nginx, PgBouncer, Docker, JMeter, Prometheus, and Grafana.
 
-This project is designed to demonstrate how a backend system can handle real performance and reliability problems under concurrent traffic: safe checkout, race-condition prevention, database connection control, asynchronous queues, chunk-based batch processing, distributed caching, and load balancing across multiple application containers.
+This project is designed to demonstrate how a backend system can handle real performance and reliability problems under concurrent traffic: safe checkout, race-condition prevention, database connection control, asynchronous queues, chunk-based batch processing, distributed caching, distributed cache locks, transaction integrity, stress testing, bottleneck analysis, structured request logging, and load balancing across multiple application containers.
 
 ## Table of Contents
 
@@ -17,7 +17,9 @@ This project is designed to demonstrate how a backend system can handle real per
 - [Seed Test Data](#seed-test-data)
 - [Useful URLs](#useful-urls)
 - [Common Docker Commands](#common-docker-commands)
-- [Load Testing With Locust](#load-testing-with-locust)
+- [JMeter Stress Testing](#jmeter-stress-testing)
+- [Monitoring With Prometheus and Grafana](#monitoring-with-prometheus-and-grafana)
+- [Structured Runtime Logs](#structured-runtime-logs)
 - [Requirement Evidence Commands](#requirement-evidence-commands)
 - [API Endpoints](#api-endpoints)
 - [Troubleshooting](#troubleshooting)
@@ -26,7 +28,7 @@ This project is designed to demonstrate how a backend system can handle real per
 
 The backend exposes REST APIs for users, products, carts, orders, checkout, administrative demo endpoints, and background processing. It is deployed as multiple Django/Gunicorn containers behind Nginx, with Redis for caching and task brokering, Celery for background jobs, PostgreSQL for persistent storage, and PgBouncer for database connection pooling.
 
-The system is intentionally built to support load testing and university/report evidence. A new developer can run the full stack with Docker Compose, seed realistic e-commerce data, run Locust tests, and capture proof for each performance requirement.
+The system is intentionally built to support load testing and university/report evidence. A new developer can run the full stack with Docker Compose, seed realistic e-commerce data, run focused Locust demos for earlier requirements, run the full-system JMeter stress test, and capture proof for each performance requirement.
 
 ## Technology Stack
 
@@ -43,13 +45,15 @@ The system is intentionally built to support load testing and university/report 
 | Web server | Gunicorn | Runs Django WSGI app |
 | Reverse proxy | Nginx | Load balancer and static file proxy |
 | Containers | Docker / Docker Compose | Local deployment and orchestration |
-| Load testing | Locust | Concurrent user simulation and requirement tests |
-| Monitoring tools | Flower, pgAdmin | Celery and database inspection |
+| Load testing | Apache JMeter | Full-system stress testing for Requirement 9 |
+| Monitoring | Prometheus + Grafana | Requirement 10 dashboards and bottleneck analysis |
+| Exporters | cAdvisor, node-exporter, postgres-exporter, redis-exporter | Container, host, PostgreSQL, and Redis metrics |
+| Inspection tools | pgAdmin | Optional database inspection |
 
 ## Architecture
 
 ```text
-Client / Locust
+Client / JMeter / Postman / Browser
       |
       v
 Nginx load balancer
@@ -110,8 +114,9 @@ This prevents heavy batch jobs or email spikes from blocking unrelated backgroun
 ## Main Features
 
 - User authentication and token-based API access.
-- Product catalog listing and detail endpoints.
-- Redis-backed product caching.
+- Product catalog listing, detail, top-selling, reviews, and rating summary endpoints.
+- Redis-backed product caching using a Cache-Aside pattern.
+- Redis distributed locking to prevent cache stampede on expensive cache rebuilds.
 - Cart add/view/clear operations.
 - Safe checkout and order creation.
 - Stock race-condition protection using transactions and row-level locking.
@@ -120,9 +125,11 @@ This prevents heavy batch jobs or email spikes from blocking unrelated backgroun
 - Dedicated Celery queues for general, email, and batch jobs.
 - Scheduled daily sales aggregation with Celery Beat.
 - Chunk-based batch processing for large order datasets.
-- Nginx load balancing across three Django/Gunicorn containers.
+- Nginx load balancing across five Django/Gunicorn containers.
 - PgBouncer transaction pooling for PostgreSQL connection control.
-- Locust load tests for focused requirement validation.
+- JMeter stress test plan for a complete purchase flow.
+- Prometheus and Grafana monitoring stack for resource and bottleneck analysis.
+- Structured logs grouped by subsystem under `logs/`.
 
 ## Performance Requirements Covered
 
@@ -144,7 +151,7 @@ The stack controls resource usage through:
 - PgBouncer connection pooling.
 - PostgreSQL `max_connections` headroom.
 - A dedicated capacity stress endpoint.
-- Locust tests that report response time and observed DB connections.
+- focused load tests that report response time and observed DB connections.
 
 ### Requirement 3: Asynchronous Queues
 
@@ -176,12 +183,123 @@ Important config:
 
 ### Requirement 6: Distributed Caching
 
-Redis is used to cache frequently requested product data and reduce repeated PostgreSQL queries during product browsing load.
+Redis is used as a distributed cache for read-heavy product endpoints. The project follows a Cache-Aside pattern:
+
+1. The API checks Redis using a deterministic cache key.
+2. If the data exists, the response is served from Redis.
+3. If the data is missing, Django reads from PostgreSQL, serializes the response, stores it in Redis with a TTL, and returns it.
+
+Cached endpoints include:
+
+- `GET /api/products/`
+- `GET /api/products/{id}/`
+- `GET /api/products/top-selling/`
+- `GET /api/products/{id}/rating-summary/`
+
+Important design decision: public cache payloads do not store `stock`. Stock is sensitive and changes during reservations and checkout, so it is always read and modified inside database transactions.
 
 Important code:
 
+- `apps/products/cache_utils.py`
 - `apps/products/views.py`
-- `config/settings.py`
+- `apps/products/serializers.py`
+
+### Requirement 7: Concurrency Control
+
+The project uses both database locking and Redis locking depending on the problem being solved.
+
+Database-level locking is used for stock-sensitive operations:
+
+- `POST /api/products/{id}/reserve/`
+- `POST /api/orders/checkout/`
+- `POST /api/orders/{id}/process-payment/`
+- admin stock updates
+
+These flows use `transaction.atomic()` and `select_for_update()` to serialize access to sensitive rows and prevent race conditions, double payment, and overselling.
+
+Redis distributed locks are used for cache stampede protection. When many requests hit an expired expensive cache key at the same time, only one request rebuilds the cache while the others wait briefly and then read from Redis.
+
+Important code:
+
+- `apps/products/cache_utils.py`
+- `apps/products/services.py`
+- `apps/orders/services.py`
+
+### Requirement 8: Transaction Integrity / ACID
+
+Checkout and payment flows are protected with ACID transactions. The most important transaction is the checkout flow:
+
+1. Read the user's cart.
+2. Lock product rows in a consistent order.
+3. Validate stock while the rows are locked.
+4. Deduct stock.
+5. Create the order.
+6. Create order items.
+7. Create the payment record.
+8. Clear the cart.
+
+If any step fails, the entire transaction is rolled back. This ensures that the system never creates a partial order, never deducts stock without an order, and never oversells stock under concurrent access.
+
+Important code:
+
+- `apps/orders/services.py`
+- `apps/orders/views.py`
+- `apps/products/services.py`
+- `apps/cart/services.py`
+
+### Requirement 9: Stress Testing
+
+Requirement 9 is tested with Apache JMeter, not Locust. The JMeter plan runs a complete purchase flow with at least 100 concurrent users in the optimized AFTER state of the system.
+
+JMeter test plan:
+
+- `req9_jmeter/req9_full_system_stress_test.jmx`
+
+The tested flow is:
+
+```text
+1.  GET    /api/users/me/
+2.  GET    /api/products/
+3.  GET    /api/products/{id}/
+4.  GET    /api/products/{id}/reviews/
+5.  GET    /api/products/{id}/rating-summary/
+6.  DELETE /api/cart/clear/
+7.  POST   /api/cart/add/
+8.  GET    /api/cart/
+9.  PATCH  /api/cart/{product_id}/quantity/
+10. POST   /api/products/{id}/reserve/
+11. POST   /api/orders/checkout/
+12. GET    /api/orders/{id}/
+13. POST   /api/orders/{id}/process-payment/
+14. GET    /api/orders/
+15. POST   /api/products/{id}/reviews/
+16. GET    /api/products/{id}/rating-summary/
+```
+
+The goal is to prove that 100 users can complete a realistic purchase flow without system collapse, data corruption, negative stock, or unhandled server errors.
+
+### Requirement 10: Benchmarking and Bottleneck Analysis
+
+Requirement 10 is supported by:
+
+- JMeter response-time reports.
+- Prometheus metrics.
+- Grafana dashboards.
+- Structured request logs.
+
+The monitoring stack is isolated from the main application stack:
+
+- `req10_monitoring/docker-compose.monitoring.yml`
+- `req10_monitoring/prometheus/prometheus.yml`
+- `req10_monitoring/grafana/dashboards/req9-overview.json`
+
+The primary bottleneck observed during the complete purchase flow is expected around:
+
+```text
+POST /api/orders/checkout/
+```
+
+This endpoint performs a database transaction and locks product rows to protect stock. When many users buy the same product concurrently, PostgreSQL intentionally serializes access to that product row. This increases p95/p99 latency but protects data integrity and prevents overselling.
 
 ## Prerequisites
 
@@ -233,7 +351,49 @@ git clone <repo-url>
 cd high-performance-ecommerce-backend
 ```
 
-### 2. Start the full stack
+### 2. Download Docker images
+
+Application stack:
+
+```bash
+docker compose pull
+```
+
+Monitoring stack:
+
+```bash
+docker compose -f req10_monitoring/docker-compose.monitoring.yml pull
+```
+
+The main containers/images used by the project are:
+
+```text
+PostgreSQL
+PgBouncer
+Redis
+Django/Gunicorn app containers
+Celery workers
+Celery Beat
+Nginx
+pgAdmin
+Prometheus
+Grafana
+cAdvisor
+node-exporter
+postgres-exporter
+redis-exporter
+```
+
+Python dependencies are installed from:
+
+```text
+requirements.txt
+requirements.dev.txt
+```
+
+The monitoring stack is installed through Docker images, so no Python monitoring library is required inside Django for the current Req10 setup.
+
+### 3. Start the full stack
 
 ```bash
 docker compose up --build -d
@@ -249,11 +409,10 @@ This starts:
 - Celery workers
 - Celery Beat
 - Nginx
-- Flower
 - pgAdmin
-- Locust service
+- optional Locust service for older focused tests
 
-### 3. Check containers
+### 4. Check containers
 
 ```bash
 docker ps
@@ -277,7 +436,7 @@ ecommerce_celery_batch_worker
 ecommerce_celery_beat
 ```
 
-### 4. Run migrations manually if needed
+### 5. Run migrations manually if needed
 
 The `migrate` service runs automatically, but this command is useful during development:
 
@@ -303,7 +462,7 @@ docker compose run --rm app1 python manage.py seed_ecommerce --clean
 
 The seeder creates:
 
-- 100 Locust test users.
+- 100 load-test users (`locust_1@test.com` through `locust_100@test.com`).
 - Regular users.
 - Normal high-stock products.
 - Hot low-stock products for race-condition tests.
@@ -323,15 +482,22 @@ docker exec ecommerce_db psql -U ecommerce_user -d ecommerce_db -c "SELECT COUNT
 | Service | URL |
 | --- | --- |
 | API through Nginx | `http://localhost/` |
-| Locust UI | `http://localhost:8089` or custom mapped port |
-| Flower | `http://localhost:5555` |
 | pgAdmin | `http://localhost:5050` |
 | Nginx health | `http://localhost/nginx-health` |
+| Prometheus | `http://localhost:9090` |
+| Grafana | `http://localhost:3000` |
 
 pgAdmin default credentials from `docker-compose.yml`:
 
 ```text
 Email: admin@admin.com
+Password: admin
+```
+
+Grafana default credentials:
+
+```text
+Username: admin
 Password: admin
 ```
 
@@ -409,55 +575,184 @@ Watch resource usage:
 docker stats ecommerce_app1 ecommerce_app2 ecommerce_app3 ecommerce_app4 ecommerce_app5 ecommerce_pgbouncer ecommerce_db ecommerce_nginx ecommerce_redis
 ```
 
-## Load Testing With Locust
+## JMeter Stress Testing
 
-The `locustfile.py` supports selectable test modes using `LOCUST_MODE`.
+Requirement 9 uses Apache JMeter.
 
-### Run Locust UI
+Test plan:
+
+```text
+req9_jmeter/req9_full_system_stress_test.jmx
+```
+
+The plan uses token-based authentication from:
+
+```text
+req9_jmeter/users.csv
+```
+
+After running `seed_ecommerce --clean`, regenerate the token CSV because user IDs and tokens may change:
 
 ```bash
-docker compose run --rm -p 8090:8089 \
-  -e LOCUST_MODE=normal \
-  -e ADMIN_TOKEN="<admin-token>" \
-  locust -f locustfile.py --host http://nginx:80
+docker compose exec -T app1 python manage.py shell -c "from django.contrib.auth import get_user_model; from rest_framework.authtoken.models import Token; U=get_user_model(); print('email,token'); [print(f'{u.email},{Token.objects.get_or_create(user=u)[0].key}') for u in U.objects.filter(email__startswith='locust_').order_by('id')[:100]]" > req9_jmeter/users.csv
+```
+
+Pick a high-stock product for the stress product:
+
+```bash
+docker compose exec -T app1 python manage.py shell -c "from apps.products.models import Product; print('\n'.join(f'{p.id} | {p.name} | stock={p.stock}' for p in Product.objects.filter(is_active=True, stock__gt=100).order_by('-stock')[:10]))"
+```
+
+Set the selected ID in JMeter as:
+
+```text
+stress_product_id=<product-id>
+```
+
+### Run From JMeter GUI
+
+1. Open Apache JMeter.
+2. Open `req9_jmeter/req9_full_system_stress_test.jmx`.
+3. Set:
+
+```text
+host=localhost
+port=80
+protocol=http
+tx_threads=100
+stress_product_id=<high-stock-product-id>
+```
+
+4. Run the test and save Aggregate/Summary results under `req9_jmeter/results/`.
+
+### Run From CLI
+
+```bash
+mkdir -p req9_jmeter/results
+
+jmeter -n \
+  -t req9_jmeter/req9_full_system_stress_test.jmx \
+  -l req9_jmeter/results/req9-results.jtl \
+  -e -o req9_jmeter/results/html-report \
+  -Jhost=localhost \
+  -Jport=80 \
+  -Jprotocol=http \
+  -Jtx_threads=100 \
+  -Jstress_product_id=<high-stock-product-id>
+```
+
+Do not commit generated result files such as `aggregate.csv`, `summary.csv`, `.jtl`, or `html-report/`. They are local evidence files and can be screenshotted for the report.
+
+## Monitoring With Prometheus and Grafana
+
+Requirement 10 uses a separate monitoring compose file. It is intentionally isolated from the main application stack so monitoring can be started, stopped, or removed without changing the application containers.
+
+Download monitoring images:
+
+```bash
+docker compose -f req10_monitoring/docker-compose.monitoring.yml pull
+```
+
+Start monitoring:
+
+```bash
+docker compose -f req10_monitoring/docker-compose.monitoring.yml up -d
+```
+
+If the application network name is different, pass it explicitly:
+
+```bash
+APP_NETWORK_NAME=parallelprogrammingproject_ecommerce-network \
+docker compose -f req10_monitoring/docker-compose.monitoring.yml up -d
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8090
+Prometheus: http://localhost:9090
+Grafana:    http://localhost:3000
 ```
 
-In the UI:
+Check Prometheus targets:
 
 ```text
-Number of users: 50
-Ramp up: 10
-Host: http://nginx:80
+http://localhost:9090/targets
 ```
 
-### Run Locust headless
+Grafana is provisioned with a Prometheus datasource and a starter dashboard for:
+
+- container CPU usage
+- container memory working set
+- Redis command rate
+- PostgreSQL connections
+
+Stop monitoring:
 
 ```bash
-docker compose run --rm \
-  -e LOCUST_MODE=normal \
-  -e ADMIN_TOKEN="<admin-token>" \
-  locust -f locustfile.py --host http://nginx:80 \
-  --users 50 --spawn-rate 10 --headless --run-time 1m
+docker compose -f req10_monitoring/docker-compose.monitoring.yml down
 ```
 
-### Locust Modes
+## Structured Runtime Logs
 
-| Mode | Purpose |
-| --- | --- |
-| `normal` | Full normal e-commerce workload |
-| `browsing` | Product browsing and cache-heavy reads |
-| `race_before` | Unsafe race-condition demo endpoint |
-| `req2` | Capacity/resource stress endpoint |
-| `req3_sync` | Synchronous flow comparison |
-| `req3_async` | Asynchronous flow comparison |
-| `req4_before` | Naive batch processing demo |
-| `req4_after` | Chunked batch processing demo |
+The project automatically creates structured log files under:
+
+```text
+logs/
+```
+
+Runtime log groups:
+
+```text
+logs/cart/
+logs/products/
+logs/orders/
+logs/payments/
+logs/user_tracking/
+```
+
+Each group may contain:
+
+```text
+info.log
+warnings.log
+errors.log
+```
+
+The request tracking middleware records every API request with fields such as:
+
+```text
+request_id
+method
+endpoint
+user_id
+status_code
+elapsed_ms
+result
+```
+
+Example:
+
+```text
+request_id=abc123 method=POST endpoint=/api/orders/checkout/ user_id=2501 event=request.completed status_code=201 elapsed_ms=850 result=completed
+```
+
+Before each new JMeter run, clear old logs:
+
+```bash
+docker compose exec app1 python manage.py clear_logs
+```
+
+Generated log files are runtime evidence and should not normally be committed to Git. The code that creates them is committed; the local `.log` outputs are not.
+
+## Legacy Locust Tests
+
+Older focused requirement tests still exist under:
+
+```text
+locust_tests/
+```
+
+They are useful for Req6/Req7 before-after demonstrations, but the official full-system stress test for Req9 uses JMeter.
 
 ## Requirement Evidence Commands
 
@@ -633,14 +928,13 @@ upstream=<app5-ip>:8000
 
 ### Requirement 6: Distributed Caching
 
-Run browsing/cache-heavy workload:
+Run the Req6 cache evidence tests:
 
 ```bash
 docker compose run --rm \
-  -e LOCUST_MODE=browsing \
-  -e ADMIN_TOKEN="<admin-token>" \
-  locust -f locustfile.py --host http://nginx:80 \
-  --users 50 --spawn-rate 10 --headless --run-time 1m
+  locust -f locust_tests/req6/locust_req6.py \
+  --host http://nginx:80 \
+  --users 100 --spawn-rate 15 --headless --run-time 1m
 ```
 
 Check Redis is alive:
@@ -654,6 +948,119 @@ Optional: inspect Redis keys:
 ```bash
 docker exec ecommerce_redis redis-cli keys '*'
 ```
+
+Important cache keys include product list, product detail, top-selling products, and rating summaries. Public cached product payloads intentionally exclude `stock`.
+
+### Requirement 7: Concurrency Control
+
+Run the Redis distributed-lock cache stampede test:
+
+```bash
+docker compose run --rm -p 8092:8089 \
+  -e LOCUST_MODE=req7_after \
+  -e REQ7_DELAY_MS=0 \
+  locust -f locust_tests/req7/locust_req7_distributed_lock.py \
+  --host http://nginx:80 -u 100 -r 15 --run-time 30s
+```
+
+Expected evidence:
+
+- `DB Rebuilds` should be close to `1` per protected cache key.
+- `Protected` should be `YES`.
+- `Fallback DB Reads` should be `0`.
+
+For database locking evidence, inspect safe transactional paths:
+
+```text
+POST /api/products/{id}/reserve/
+POST /api/orders/checkout/
+POST /api/orders/{id}/process-payment/
+```
+
+These paths use pessimistic locks to protect stock, orders, and payment state.
+
+### Requirement 8: Transaction Integrity / ACID
+
+Run the complete purchase flow with JMeter or Postman and verify that orders are not partial:
+
+```bash
+docker exec ecommerce_db psql -U ecommerce_user -d ecommerce_db \
+  -c "SELECT COUNT(*) AS negative_stock FROM products_product WHERE stock < 0;"
+```
+
+Expected:
+
+```text
+negative_stock = 0
+```
+
+Verify that paid/created orders have order items:
+
+```bash
+docker exec ecommerce_db psql -U ecommerce_user -d ecommerce_db \
+  -c "SELECT COUNT(*) AS orders_without_items FROM orders_order o LEFT JOIN orders_orderitem i ON i.order_id = o.id WHERE i.id IS NULL;"
+```
+
+Expected:
+
+```text
+orders_without_items = 0
+```
+
+The important guarantee is that checkout either fully succeeds or fully rolls back.
+
+### Requirement 9: Full-System Stress Test
+
+Run the official JMeter test plan:
+
+```bash
+jmeter -n \
+  -t req9_jmeter/req9_full_system_stress_test.jmx \
+  -l req9_jmeter/results/req9-results.jtl \
+  -e -o req9_jmeter/results/html-report \
+  -Jhost=localhost \
+  -Jport=80 \
+  -Jprotocol=http \
+  -Jtx_threads=100 \
+  -Jstress_product_id=<high-stock-product-id>
+```
+
+Expected evidence:
+
+- at least 100 simulated users
+- full purchase flow executed
+- no server crash
+- no unhandled 500 errors
+- no negative stock
+- successful order and payment logs
+
+### Requirement 10: Benchmarking and Bottleneck Analysis
+
+Start monitoring before running JMeter:
+
+```bash
+docker compose -f req10_monitoring/docker-compose.monitoring.yml up -d
+```
+
+Open Grafana:
+
+```text
+http://localhost:3000
+```
+
+Recommended screenshots for the report:
+
+- JMeter Aggregate Report / Summary Report
+- Grafana CPU panel
+- Grafana Memory panel
+- Grafana Redis command rate panel
+- Grafana PostgreSQL connections panel
+- `logs/user_tracking/info.log`
+- `logs/user_tracking/warnings.log`
+- `logs/orders/info.log`
+- `logs/payments/info.log`
+
+The main bottleneck to discuss is usually `POST /api/orders/checkout/`, because it performs a transaction and locks product rows. This can increase p95/p99 latency under high concurrency on the same product, while still preserving data correctness.
 
 ## API Endpoints
 
@@ -692,9 +1099,19 @@ curl -X POST http://localhost/api/core/capacity-stress/ \
 
 ## Troubleshooting
 
+### JMeter result file already exists
+
+If JMeter asks whether to append or overwrite a result file, choose overwrite for a clean run, or clear `req9_jmeter/results/` before starting a new test.
+
+Do not set a result filename to a directory path such as `/home/ebraheem`; it must be a real file path such as:
+
+```text
+req9_jmeter/results/aggregate.csv
+```
+
 ### Port 8089 is already allocated
 
-An old Locust container may still be running.
+This only applies to legacy Locust runs. An old Locust container may still be running.
 
 ```bash
 docker ps -a --filter network=high-performance-ecommerce-backend_ecommerce-network
@@ -756,15 +1173,19 @@ docker compose run --rm app1 python manage.py seed_ecommerce --clean
 
 ## Report Evidence Checklist
 
-For a university/report submission, capture:
 
-- `docker-compose.yml`: app1/app2/app3, PgBouncer, Celery workers, Nginx.
+- `docker-compose.yml`: app1-app5, PgBouncer, Redis, Celery workers, Celery Beat, Nginx.
 - `nginx/nginx.conf`: Least Connections upstream config and upstream logging.
-- Locust results for normal, req2, req4_before, and req4_after modes.
+- Req6/Req7 focused Locust evidence if before-after cache/cache-lock proof is required.
+- `req9_jmeter/req9_full_system_stress_test.jmx`: complete 100-user purchase flow.
+- JMeter Aggregate/Summary screenshots for Req9.
+- Grafana dashboard screenshots for Req10.
+- Structured logs under `logs/user_tracking`, `logs/cart`, `logs/orders`, `logs/payments`, and `logs/products`.
 - Nginx logs showing requests distributed to all five upstream app containers.
 - Celery logs showing dedicated queues and batch chunk processing.
 - PostgreSQL query output showing stock never becomes negative after safe checkout.
 - PgBouncer/DB connection evidence showing controlled database connections.
+- Bottleneck explanation for `POST /api/orders/checkout/` under concurrent purchase pressure.
 
 ## License
 
