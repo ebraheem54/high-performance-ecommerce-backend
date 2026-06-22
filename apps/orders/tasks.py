@@ -1,15 +1,4 @@
-"""
-Async Celery tasks for orders app — Requirement 3: Asynchronous Queues
-═══════════════════════════════════════════════════════════════════════
-All tasks here are FIRE-AND-FORGET:
-  - The checkout HTTP response is returned to the user IMMEDIATELY.
-  - These tasks run in a Celery worker AFTER the response is sent.
-  - The user never waits for email delivery or invoice processing.
-
-This is the core proof of Requirement 3:
-  HTTP response time ≈ DB transaction time  (fast)
-  Email delivery time = separate async task  (doesn't block user)
-"""
+"""Async Celery tasks for order-related background work."""
 
 import logging
 import time
@@ -49,7 +38,6 @@ def send_order_confirmation_email(self, order_id: int):
     user  = order.user
     items = order.items.all()
 
-    # ── Build email body ───────────────────────────────────────────────────────
     items_lines = "\n".join([
         f"  • {item.product.name}  x{item.quantity}  @ {item.unit_price} = {item.unit_price * item.quantity}"
         for item in items
@@ -81,9 +69,7 @@ the checkout API returned 201. Your request was not
 delayed waiting for this email to be sent.
 """
 
-    # Real email sending is temporarily disabled because the email service is expired.
-    # sleep(2) is used only to simulate email sending delay for Requirement 3 testing.
-    # The real email service will be enabled again later.
+    # Simulate email latency without blocking the checkout response.
     logger.info(
         "[EMAIL] Simulating confirmation email for Order #%s to %s (sleep 2s) ...",
         order.id, user.email,
@@ -120,9 +106,7 @@ please contact our support team.
 [Async Processing — Requirement 3]
 """
 
-    # Real email sending is temporarily disabled because the email service is expired.
-    # sleep(2) is used only to simulate email sending delay for Requirement 3 testing.
-    # The real email service will be enabled again later.
+    # Simulate email latency without blocking the cancel response.
     logger.info(
         "[EMAIL] Simulating cancellation email for Order #%s to %s (sleep 2s) ...",
         order.id, user.email,
@@ -137,18 +121,7 @@ please contact our support team.
 @shared_task(bind=True, max_retries=3, default_retry_delay=30)
 def process_wallet_payment_async(self, user_id: int):
     """
-    ✅ AFTER SOLUTION — Req 3 Payment Simulation:
-    معالجة الدفع من المحفظة بشكل غير متزامن (Async).
-
-    يُستدعى من checkout_wallet_async_view بعد أن يحصل المستخدم على HTTP 202 فوراً.
-    هذه الـ task تنفذ:
-      1. فحص رصيد المحفظة
-      2. sleep(3) — محاكاة بوابة الدفع الخارجية
-      3. خصم الرصيد + إنشاء الطلب (كل ذلك في الخلفية)
-
-    الفرق عن checkout_wallet_sync_view:
-      BEFORE (sync)  → المستخدم ينتظر 3s+ داخل HTTP request
-      AFTER  (async) → HTTP يرجع <300ms، هذه الـ task تعمل هنا في الخلفية
+    Process wallet payment asynchronously after the HTTP 202 response.
     """
     from apps.users.models import User
 
@@ -159,7 +132,7 @@ def process_wallet_payment_async(self, user_id: int):
         return
 
     logger.info(
-        "[WALLET-TASK] 💳 بدء معالجة الدفع async للمستخدم=%s ...",
+        "[WALLET-TASK] Processing async wallet payment for user=%s ...",
         user.email,
     )
 
@@ -167,17 +140,17 @@ def process_wallet_payment_async(self, user_id: int):
         from apps.orders.services import checkout_with_wallet
         order = checkout_with_wallet(user)
         logger.info(
-            "[WALLET-TASK] ✅ تم إنشاء الطلب #%s للمستخدم=%s — الرصيد المتبقي=%s",
+            "[WALLET-TASK] Order #%s created for user=%s wallet_remaining=%s",
             order.id, user.email, user.wallet_balance,
         )
     except ValueError as exc:
         logger.warning(
-            "[WALLET-TASK]  فشل الدفع للمستخدم=%s: %s",
+            "[WALLET-TASK] Wallet payment failed for user=%s: %s",
             user.email, exc,
         )
     except Exception as exc:
         logger.error(
-            "[WALLET-TASK] 🔥 خطأ غير متوقع للمستخدم=%s: %s — إعادة المحاولة...",
+            "[WALLET-TASK] Unexpected wallet payment error for user=%s: %s; retrying",
             user.email, exc,
         )
         raise self.retry(exc=exc)

@@ -1,9 +1,4 @@
-"""
-Async Celery tasks for users app — Requirement 3: Asynchronous Queues
-═══════════════════════════════════════════════════════════════════════
-Emails are sent ASYNCHRONOUSLY — registration response returns instantly,
-Celery delivers the welcome email in the background.
-"""
+"""Async Celery tasks for user-related background work."""
 
 import logging
 from celery import shared_task
@@ -15,16 +10,7 @@ logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def send_welcome_email(self, user_id: int):
-    """
-    Asynchronous Processing (Requirement 3):
-    Send a welcome email AFTER the registration response is returned.
-
-    Flow:
-      1. POST /api/users/register/  → user created → returns 201
-      2. send_welcome_email.delay(user.id)  ← fires here (async)
-      3. Celery worker sends the email via Mailtrap
-      4. User receives welcome email — without slowing down registration
-    """
+    """Send a welcome email after registration returns."""
     from django.contrib.auth import get_user_model
     User = get_user_model()
 

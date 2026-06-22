@@ -15,14 +15,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # e.g. `from products import views` instead of `from apps.products import views`
 
 
-# ── Security ──────────────────────────────────────────────────────────────────
+# Security
 SECRET_KEY = config("SECRET_KEY", default="django-insecure-change-me-in-production")
 DEBUG = config("DEBUG", default=True, cast=bool)
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="*").split(",")
 
-# ── Custom User Model ─────────────────────────────────────────────────────────
+# Custom user model
 AUTH_USER_MODEL = "users.User"
-# ── Installed Apps ────────────────────────────────────────────────────────────
+# Installed apps
 INSTALLED_APPS = [
     # Django built-ins
     "django.contrib.admin",
@@ -47,7 +47,7 @@ INSTALLED_APPS = [
     # "apps.reports",
 ]
 
-# ── Middleware ────────────────────────────────────────────────────────────────
+# Middleware
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",  # must be before CommonMiddleware
@@ -80,7 +80,7 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 
-# ── Database (PostgreSQL) ─────────────────────────────────────────────────────
+# Database
 _DATABASE_URL = os.environ.get("DATABASE_URL")
 if _DATABASE_URL:
     DATABASES = {"default": dj_database_url.parse(_DATABASE_URL)}
@@ -97,12 +97,12 @@ else:
     }
 
 
-# ── DB Connection Pooling — Resource Management (Requirement 2) ───────────────
+# Database connection pooling
 DATABASES["default"]["CONN_MAX_AGE"] = config("CONN_MAX_AGE", default=60, cast=int)
 DATABASES["default"]["DISABLE_SERVER_SIDE_CURSORS"] = True
 
 
-# ── Password Validation ───────────────────────────────────────────────────────
+# Password validation
 AUTH_PASSWORD_VALIDATORS = [
     {
         "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"
@@ -112,7 +112,7 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-# ── Internationalization ──────────────────────────────────────────────────────
+# Internationalization
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
 USE_I18N = True
@@ -122,7 +122,7 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# ── Django REST Framework ─────────────────────────────────────────────────────
+# Django REST Framework
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.TokenAuthentication",
@@ -143,7 +143,7 @@ REST_FRAMEWORK = {
 }
 
 
-# ── Redis Cache — Distributed Caching (Requirement 6) ────────────────────────
+# Redis cache
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
@@ -154,7 +154,7 @@ CACHES = {
     }
 }
 
-# ── Celery — Async Queues (Requirement 3) ─────────────────────────────────────
+# Celery
 CELERY_BROKER_URL = config("REDIS_URL", default="redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = config("REDIS_URL", default="redis://localhost:6379/0")
 CELERY_ACCEPT_CONTENT = ["json"]
@@ -162,15 +162,15 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
 
-# Worker concurrency — Resource Management (Requirement 2)
+# Worker concurrency.
 # Controls max parallel tasks: celery -A config worker --concurrency=4
 CELERY_WORKER_CONCURRENCY = config("CELERY_CONCURRENCY", default=4, cast=int)
 
-# ── Celery Beat Schedule — Batch Processing (Requirement 4) ──────────────────
+# Celery beat schedule
 from celery.schedules import crontab
 
 CELERY_BEAT_SCHEDULE = {
-    # Nightly batch: aggregate daily sales at 1:00 AM — Requirement 4
+    # Nightly batch: aggregate daily sales at 1:00 AM.
     "daily-sales-report": {
         "task": "apps.core.tasks.run_daily_sales_batch_task",
         "schedule": crontab(hour=1, minute=0),
@@ -180,50 +180,46 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.products.tasks.release_expired_locks_task",
         "schedule": crontab(minute="*/5"),
     },
-    # Clean up abandoned carts every Sunday at midnight — Requirement 4
+    # Clean up abandoned carts every Sunday at midnight.
     "cleanup-abandoned-carts": {
         "task": "apps.cart.tasks.cleanup_abandoned_carts",
         "schedule": crontab(hour=0, minute=0, day_of_week=0),
     },
 }
 
-# ── Celery Queue Routing — Async Queues (Requirement 3) ──────────────────────
+# Celery queue routing
 # Separates tasks into dedicated queues so a flood of email tasks cannot block
 # the batch processing queue.
 #
-# Run workers (after-solution setup):
+# Run workers with dedicated queues:
 #   Email worker:  celery -A config worker -Q emails   --loglevel=info -c 4
 #   Batch worker:  celery -A config worker -Q batch    --loglevel=info -c 2
 #   Default worker:celery -A config worker -Q celery   --loglevel=info -c 4
 #
-# Single worker (all queues together — before-solution comparison):
-#   celery -A config worker -Q emails,batch,celery --loglevel=info
-#
-# To REMOVE: delete this entire block (CELERY_TASK_QUEUES + CELERY_TASK_ROUTES).
 from kombu import Queue as _Queue
 
 CELERY_TASK_QUEUES = (
-    _Queue("emails"),    # Email notification tasks (Req 3)
-    _Queue("batch"),     # Batch processing tasks   (Req 4)
+    _Queue("emails"),    # Email notification tasks
+    _Queue("batch"),     # Batch processing tasks
     _Queue("celery"),    # General / default tasks
 )
 
 CELERY_TASK_ROUTES = {
-    # ── Email tasks → emails queue ─────────────────────────────────────────────
+    # Email tasks
     "apps.orders.tasks.send_order_confirmation_email": {"queue": "emails"},
     "apps.orders.tasks.send_order_cancelled_email":    {"queue": "emails"},
-    # ── Batch tasks → batch queue ──────────────────────────────────────────────
+    # Batch tasks
     "apps.core.tasks.run_daily_sales_batch_task":      {"queue": "batch"},
     "apps.cart.tasks.cleanup_abandoned_carts":          {"queue": "batch"},
-    # ── General tasks → default celery queue ──────────────────────────────────
+    # General tasks
     "apps.products.tasks.release_expired_locks_task":  {"queue": "celery"},
     "apps.products.tasks.invalidate_product_cache":    {"queue": "celery"},
 }
 
-# ── CORS ──────────────────────────────────────────────────────────────────────
+# CORS
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 
-# ── API Docs (drf-spectacular) ────────────────────────────────────────────────
+# API docs
 SPECTACULAR_SETTINGS = {
     "TITLE": "High-Performance E-Commerce API",
     "DESCRIPTION": "E-Commerce Backend with concurrency control, Redis caching, and batch processing.",
@@ -247,7 +243,7 @@ else:
 
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@ecommerce.dev")
 
-# ── Structured Log Files — Requirement 10 Monitoring Evidence ───────────────
+# Structured log files
 LOG_DIR = BASE_DIR / "logs"
 for _log_subdir in (
     "cart",

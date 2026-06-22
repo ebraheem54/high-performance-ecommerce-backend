@@ -1,18 +1,4 @@
-"""
-Business logic for cart app.
-
-Synchronization Strategy:
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  add_to_cart       → OPTIMISTIC LOCKING                            │
-  │    Why? Cart updates are per-user/product — conflict rate is LOW.   │
-  │    Optimistic locking avoids DB-level locks, maximizes throughput.  │
-  │    On conflict (version mismatch) the request retries up to N times.│
-  │                                                                     │
-  │  update_cart_item_quantity → PESSIMISTIC LOCKING                   │
-  │    Explicit "set quantity" needs strict serialization — pessimistic  │
-  │    guarantees the last writer wins with no ambiguity.               │
-  └─────────────────────────────────────────────────────────────────────┘
-"""
+"""Business logic for cart operations and concurrency control."""
 
 from apps.cart.models import CartItem
 from apps.cart.exceptions import ProductNotFoundError, OutOfStockError
@@ -23,7 +9,7 @@ from apps.core.logging_utils import log_user_event
 
 logger = logging.getLogger(__name__)
 
-# Optimistic locking config for cart item updates
+# Optimistic locking config for cart item updates.
 CART_OPTIMISTIC_MAX_RETRIES = 5
 CART_OPTIMISTIC_RETRY_DELAY = 0.03   # seconds base; multiplied by attempt number
 
@@ -52,7 +38,7 @@ def _try_add_to_cart_optimistic(user, product_id: int, quantity: int):
     """
     from apps.products.models import Product
 
-    # ── Soft stock guard (snapshot read — no lock) ────────────────────────────
+    # Snapshot stock check before attempting the cart write.
     try:
         product = Product.objects.get(id=product_id, is_active=True)
     except Product.DoesNotExist:
@@ -64,7 +50,7 @@ def _try_add_to_cart_optimistic(user, product_id: int, quantity: int):
             f"Only {product.stock} unit(s) remaining."
         )
 
-    # ── Attempt optimistic update on existing row ─────────────────────────────
+    # Update an existing item using optimistic locking.
     try:
         # Snapshot read — NO SELECT FOR UPDATE
         item = CartItem.objects.get(user=user, product_id=product_id)

@@ -30,8 +30,7 @@ class CartItem(models.Model):
         related_name="cart_items",
     )
     quantity = models.PositiveIntegerField(default=1)
-    # ── Synchronization point: Optimistic Locking ─────────────────────────────
-    # Incremented on every update. Used to detect concurrent writes.
+    # Incremented on every update to detect concurrent writes.
     # If two transactions read version=3 and both try to update,
     # only the first UPDATE WHERE version=3 succeeds (returns 1 row affected).
     # The second finds version=4 already and fails (returns 0 rows) → conflict.

@@ -48,7 +48,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         max_digits=10,
         decimal_places=2,
         default=500.00,
-        help_text="رصيد المحفظة — يُستخدم لمحاكاة الدفع (  Payment Simulation)",
+        help_text="Wallet balance used by the payment simulation.",
     )
 
     objects = UserManager()

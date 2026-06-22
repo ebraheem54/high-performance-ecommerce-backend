@@ -1,18 +1,4 @@
-"""
-Business logic for products.
-Synchronization Strategy:
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  OPTIMISTIC LOCKING  →  deduct_stock_optimistic()                  │
-  │    - Used for: pre-checkout stock check, cart add validation        │
-  │    - How: Read version → UPDATE WHERE version=X → retry if conflict │
-  │    - No DB-level lock held → high concurrency, may need retry       │
-  │                                                                     │
-  │  PESSIMISTIC LOCKING →  deduct_stock_pessimistic()                 │
-  │    - Used for: final checkout (called from orders.services)         │
-  │    - How: SELECT FOR UPDATE → holds row lock → no other TX can read │
-  │    - Guarantees atomicity at the cost of blocking other requests    │
-  └─────────────────────────────────────────────────────────────────────┘
-"""
+"""Business logic for products, stock updates, reservations, and reviews."""
 
 from django.db import transaction
 from django.utils import timezone
@@ -23,9 +9,9 @@ from apps.core.logging_utils import log_user_event
 
 logger = logging.getLogger(__name__)
 
-# Maximum retry attempts for optimistic locking conflicts
+# Maximum retry attempts for optimistic locking conflicts.
 OPTIMISTIC_MAX_RETRIES = 5
-# Delay between retries (seconds) — gives other transactions time to commit
+# Delay between retries so competing transactions can commit.
 OPTIMISTIC_RETRY_DELAY = 0.05
 
 
@@ -39,7 +25,7 @@ def get_product_by_id(product_id: int):
     return Product.objects.get(id=product_id, is_active=True)
 
 
-# OPTIMISTIC LOCKING — Products & Inventory
+# Optimistic locking for product stock updates.
 @transaction.atomic
 def deduct_stock_optimistic(
     product_id: int, quantity: int, reason: str = InventoryLog.Reason.PURCHASE
@@ -63,7 +49,7 @@ def deduct_stock_optimistic(
     Raises:
       ValueError — not enough stock available
     """
-    # Step 1: Snapshot read — NO lock acquired
+    # Snapshot read without acquiring a database lock.
     try:
         product = Product.objects.get(id=product_id, is_active=True)
     except Product.DoesNotExist:
@@ -75,9 +61,8 @@ def deduct_stock_optimistic(
         )
     captured_version = product.version
 
-    # Step 2: Conditional UPDATE — only succeeds if version hasn't changed
     # Synchronization point: this is where the race condition is resolved.
-    # Optimistic Locking: update only if version has not changed since we read it
+    # The update only succeeds if the version has not changed since the read.
     updated_rows = Product.objects.filter(
         id=product_id,
         version=captured_version,   # ← the optimistic check
@@ -96,7 +81,7 @@ def deduct_stock_optimistic(
         )
         return False  # Signal conflict to caller
 
-    # Step 3: Audit log — record every stock change for traceability
+    # Record every stock change for traceability.
     InventoryLog.objects.create(
         product_id=product_id,
         quantity_change=-quantity,
@@ -178,9 +163,7 @@ def deduct_stock_pessimistic(product: Product, quantity: int) -> None:
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# OPTIMISTIC LOCKING — Reviews
-# ═══════════════════════════════════════════════════════════════════════════════
+# Optimistic locking for reviews.
 def create_review(
     user, product_id: int, order_id, rating: int, comment: str = ""
 ) -> "Review":
