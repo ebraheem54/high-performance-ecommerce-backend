@@ -6,6 +6,8 @@ Permissions:
   - Admin   : view ALL orders, update status, cancel any order
 """
 
+import logging
+
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
@@ -14,6 +16,33 @@ from rest_framework.response import Response
 from apps.orders import services
 from apps.orders.models import Order, Payment
 from apps.orders.serializers import OrderSerializer, OrderListSerializer
+from apps.core.logging_utils import log_user_error, log_user_event, log_user_warning
+from apps.core.metrics import record_order_event
+
+logger = logging.getLogger(__name__)
+
+
+def _log_order_issue(
+    request,
+    event: str,
+    response_status: int,
+    reason: str,
+    level: str = "warning",
+    **fields,
+) -> None:
+    user_id = getattr(request.user, "id", None)
+    log_message = (
+        "order_issue level=%s event=%s user=%s status=%s reason=%s fields=%s"
+    )
+    if level == "error":
+        logger.error(log_message, level, event, user_id, response_status, reason, fields)
+        log_user_error(user_id, event, status=response_status, reason=reason, **fields)
+    elif level == "info":
+        logger.info(log_message, level, event, user_id, response_status, reason, fields)
+        log_user_event(user_id, event, status=response_status, reason=reason, **fields)
+    else:
+        logger.warning(log_message, level, event, user_id, response_status, reason, fields)
+        log_user_warning(user_id, event, status=response_status, reason=reason, **fields)
 
 
 # Customer endpoints
@@ -54,6 +83,14 @@ def checkout_view(request):
     Customer only — converts cart into a confirmed order (ACID transaction).
     """
     if request.user.is_staff:
+        record_order_event("checkout", "forbidden")
+        _log_order_issue(
+            request,
+            "order.checkout",
+            status.HTTP_403_FORBIDDEN,
+            "Admins cannot place orders.",
+            level="info",
+        )
         return Response(
             {"error": "Admins cannot place orders."},
             status=status.HTTP_403_FORBIDDEN,
@@ -61,32 +98,42 @@ def checkout_view(request):
     try:
         order = services.create_order_from_cart(request.user)
     except ValueError as e:
+        record_order_event("checkout", "failed")
+        _log_order_issue(
+            request,
+            "order.checkout",
+            status.HTTP_400_BAD_REQUEST,
+            str(e),
+            level="warning",
+        )
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
+        record_order_event("checkout", "conflict")
+        _log_order_issue(
+            request,
+            "order.checkout",
+            status.HTTP_409_CONFLICT,
+            str(e),
+            level="warning",
+        )
         return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
 
-    # ── Async Processing (Requirement 3) ─────────────────────────────────────
-    # Fire-and-forget: confirmation email is sent by Celery AFTER this response.
-    # The HTTP 201 is returned immediately — the user does NOT wait for the email.
     try:
         from apps.orders.tasks import send_order_confirmation_email
         send_order_confirmation_email.delay(order.id)
     except Exception:
-        pass   # never block the response if the queue is temporarily unavailable
+        pass
 
+    record_order_event("checkout", "success")
     return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Wallet Payment Endpoints — Requirement 3 (Payment Simulation)
-# ══════════════════════════════════════════════════════════════════════════════
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def wallet_balance_view(request):
     """
     GET /api/orders/wallet/balance/
-    إرجاع رصيد المحفظة الحالي للمستخدم.
+    Return the user's current wallet balance.
     """
     return Response({
         "wallet_balance": float(request.user.wallet_balance),
@@ -101,24 +148,23 @@ def checkout_wallet_sync_view(request):
     """
     POST /api/orders/checkout-wallet-sync/
 
-    ⚠ BEFORE SOLUTION — Req 3 Payment Demo:
-    الدفع من المحفظة يحدث SYNCHRONOUSLY داخل HTTP request.
-    المستخدم ينتظر 3 ثواني (محاكاة بوابة الدفع) قبل أن يحصل على الـ response.
-
-    تدفق كامل: فحص الرصيد → payment gateway sleep(3s) → خصم → إنشاء الطلب
-    Compare with: POST /api/orders/checkout-wallet-async/ ← returns in <300ms
+    Demo endpoint: wallet payment runs synchronously inside the request.
+    Compare with checkout-wallet-async, which returns before the worker runs.
     """
     import time as _time
 
     if request.user.is_staff:
+        record_order_event("wallet_checkout_sync", "forbidden")
         return Response({"error": "Admins cannot place orders."}, status=status.HTTP_403_FORBIDDEN)
 
     started = _time.time()
     try:
         order = services.checkout_with_wallet(request.user)
     except ValueError as e:
+        record_order_event("wallet_checkout_sync", "failed")
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
+        record_order_event("wallet_checkout_sync", "conflict")
         return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
 
     total_elapsed = round(_time.time() - started, 3)
@@ -131,6 +177,7 @@ def checkout_wallet_sync_view(request):
         "compare_with"   : "POST /api/orders/checkout-wallet-async/ (async — returns in <300ms)",
         "wallet_balance" : float(request.user.wallet_balance),
     }
+    record_order_event("wallet_checkout_sync", "success")
     return Response(data, status=status.HTTP_201_CREATED)
 
 
@@ -140,27 +187,24 @@ def checkout_wallet_async_view(request):
     """
     POST /api/orders/checkout-wallet-async/
 
-    ✅ AFTER SOLUTION — Req 3 Payment Demo:
-    الدفع من المحفظة يحدث عبر Celery task في الخلفية.
-    المستخدم يحصل على HTTP 202 فوراً — Celery يكمل فحص الرصيد والخصم لاحقاً.
-
-    الفرق الجوهري:
-      BEFORE: checkout_wallet_sync → HTTP يحجب 3s
-      AFTER : checkout_wallet_async → HTTP يرجع <300ms، Celery يعمل 3s في الخلفية
+    Demo endpoint: wallet payment runs in a Celery task and returns 202.
     """
     if request.user.is_staff:
+        record_order_event("wallet_checkout_async", "forbidden")
         return Response({"error": "Admins cannot place orders."}, status=status.HTTP_403_FORBIDDEN)
 
     try:
         from apps.orders.tasks import process_wallet_payment_async
         task = process_wallet_payment_async.delay(request.user.id)
     except Exception as e:
+        record_order_event("wallet_checkout_async", "queue_unavailable")
         return Response({"error": f"Queue unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
+    record_order_event("wallet_checkout_async", "queued")
     return Response({
         "status"     : "queued",
         "task_id"    : task.id,
-        "message"    : "✅ طلبك في قائمة الانتظار — سيتم معالجة الدفع في الخلفية",
+        "message"    : "Your payment was queued and will be processed in the background.",
         "wallet_balance": float(request.user.wallet_balance),
         "_demo"      : {
             "mode"      : "AFTER — async payment via Celery",
@@ -182,17 +226,35 @@ def cancel_order_view(request, order_id):
         user  = None if request.user.is_staff else request.user
         order = services.cancel_order(order_id, user)
     except Order.DoesNotExist:
+        record_order_event("cancel", "not_found")
+        _log_order_issue(
+            request,
+            "order.cancel",
+            status.HTTP_404_NOT_FOUND,
+            "Order not found.",
+            level="info",
+            order_id=order_id,
+        )
         return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
     except ValueError as e:
+        record_order_event("cancel", "failed")
+        _log_order_issue(
+            request,
+            "order.cancel",
+            status.HTTP_400_BAD_REQUEST,
+            str(e),
+            level="warning",
+            order_id=order_id,
+        )
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Async cancellation email (Requirement 3) — fire-and-forget
     try:
         from apps.orders.tasks import send_order_cancelled_email
         send_order_cancelled_email.delay(order.id)
     except Exception:
         pass
 
+    record_order_event("cancel", "success")
     return Response(OrderSerializer(order).data)
 
 
@@ -251,10 +313,31 @@ def process_payment_view(request, order_id):
     try:
         payment = services.process_payment(order_id, method, transaction_id, request.user)
     except Order.DoesNotExist:
+        record_order_event("payment", "not_found")
+        _log_order_issue(
+            request,
+            "payment.process",
+            status.HTTP_404_NOT_FOUND,
+            "Order not found.",
+            level="info",
+            order_id=order_id,
+        )
         return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
     except Exception as exc:
+        record_order_event("payment", "failed")
+        _log_order_issue(
+            request,
+            "payment.process",
+            status.HTTP_400_BAD_REQUEST,
+            str(exc),
+            level="warning",
+            order_id=order_id,
+            method=method,
+            transaction_id=transaction_id,
+        )
         return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
+    record_order_event("payment", "success")
     return Response({
         "order_id": order_id,
         "payment_id": payment.id,
@@ -311,9 +394,6 @@ def process_payment_unsafe_view(request, order_id):
     }, status=status.HTTP_200_OK)
 
 
-# ─────────────────────────────────────────────
-# Admin-only endpoints
-# ─────────────────────────────────────────────
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def race_demo_view(request):
@@ -321,19 +401,8 @@ def race_demo_view(request):
     POST /api/orders/race-demo/
     Body: { "product_id": <int> }
 
-    ⚠ DEMO ONLY — Direct Race Condition (NO cart, NO lock, NO stock floor)
-    ════════════════════════════════════════════════════════════════════════
-    Bypasses cart entirely. All users target the same product simultaneously.
-
-    Race window (intentional):
-      1. Read stock from DB  (no SELECT FOR UPDATE)
-      2. Check stock >= 1   (passes for ALL concurrent users if stock=10)
-      3. sleep(0.1)         ← 100ms window — all 50 users pile up HERE
-      4. F('stock') - 1     ← SQL decrement, each transaction commits serially
-      5. stock = 10-50 = -40 ← NEGATIVE → overselling PROVEN
-
-    Compare with /api/orders/checkout/ which uses SELECT FOR UPDATE:
-      → only 10 orders succeed, stock = 0 exactly, never negative.
+    Demo endpoint: direct race condition without cart, locks, or stock floor.
+    This intentionally demonstrates overselling behavior.
     """
     import time
     from django.db.models import F
@@ -346,31 +415,14 @@ def race_demo_view(request):
     if not product_id:
         return Response({"error": "product_id required."}, status=status.HTTP_400_BAD_REQUEST)
 
-    # ── Step 1: Read stock — NO lock ──────────────────────────────────────────
     try:
         product = Product.objects.get(id=product_id, is_active=True)
     except Product.DoesNotExist:
         return Response({"error": "Product not found."}, status=status.HTTP_404_NOT_FOUND)
 
-    stock_snapshot = product.stock   # snapshot — may already be stale!
-
-        # ── Step 2: NO CHECK — this is the vulnerability! ────────────────────────
-    # A real checkout would check: if stock_snapshot < 1: raise error
-    # Here we SKIP that check to show pure overselling behaviour.
-    # Every single concurrent user proceeds regardless of snapshot value.
-
-    # ── Step 3: Intentional delay — race window ───────────────────────────────
-    # All concurrent users pile up here simultaneously.
-    # None has committed an UPDATE yet — all are sleeping at the same time.
-    time.sleep(0.10)   # 100ms — all concurrent users are simultaneously here
-
-    # ── Step 4: Decrement with SQL F() expression (NO lock) ──────────────────
-    # F('stock') → SQL: UPDATE SET stock = stock - 1
-    # PostgreSQL serialises the UPDATEs at row level, but the CHECK was already
-    # done against a stale snapshot → stock will go NEGATIVE
+    stock_snapshot = product.stock
+    time.sleep(0.10)
     Product.objects.filter(id=product_id).update(stock=F("stock") - 1)
-
-    # Read the ACTUAL stock after decrement (may be negative)
     actual_stock = Product.objects.get(id=product_id).stock
 
     from apps.orders.models import Order, OrderItem, Payment
@@ -400,36 +452,13 @@ def race_demo_view(request):
     }, status=status.HTTP_201_CREATED)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ⚠ DEMO ONLY — Synchronous Checkout (Requirement 3 — BEFORE solution)
-# ══════════════════════════════════════════════════════════════════════════════
-# Purpose:
-#   Simulate the before-solution version where email sending happens
-#   SYNCHRONOUSLY inside the HTTP request — the user must wait for the
-#   full email delay before receiving a response.
-#
-# Behavior:
-#   1. Creates the order using the same production service (create_order_from_cart)
-#   2. Simulates synchronous email sending with time.sleep(2) + a log message
-#   3. Returns total elapsed time in the response body for easy comparison
-#
-# Does NOT modify checkout_view in any way.
-# Does NOT send a real email (uses console backend / sleep simulation only).
-#
-# Compare:
-#   POST /api/orders/checkout-sync/  ← this demo: response after ~2s+
-#   POST /api/orders/checkout/       ← real solution: response in <300ms
-#
-# To REMOVE: delete this function + its URL pattern in urls.py.
-# ══════════════════════════════════════════════════════════════════════════════
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def checkout_sync_demo_view(request):
     """
     POST /api/orders/checkout-sync/
 
-    ⚠ DEMO ONLY — Simulates synchronous email in the checkout path.
+    Demo endpoint: simulates synchronous email in the checkout path.
     The user waits for the full email delay before getting a response.
     """
     import time as _time
@@ -442,7 +471,6 @@ def checkout_sync_demo_view(request):
 
     started = _time.time()
 
-    # ── Step 1: Create order (same production service, unchanged) ─────────────
     try:
         order = services.create_order_from_cart(request.user)
     except ValueError as e:
@@ -452,10 +480,6 @@ def checkout_sync_demo_view(request):
 
     order_elapsed = round(_time.time() - started, 3)
 
-    # ── Step 2: ⚠ Synchronous "email sending" — blocks the HTTP response ──────
-    # In the before-solution, send_mail() is called directly here.
-    # If email takes 2 seconds, the user waits 2 extra seconds.
-    # If email fails, the user gets an error even though the order succeeded.
     import logging as _logging
     _log = _logging.getLogger(__name__)
     _log.warning(
@@ -464,7 +488,7 @@ def checkout_sync_demo_view(request):
         order.id,
     )
 
-    _time.sleep(2)   # ← simulates real SMTP latency (2 seconds)
+    _time.sleep(2)
 
     _log.warning(
         "[SYNC-EMAIL] ⚠ DEMO — Email 'sent' synchronously for Order #%s "
@@ -474,7 +498,6 @@ def checkout_sync_demo_view(request):
 
     total_elapsed = round(_time.time() - started, 3)
 
-    # ── Step 3: Return response — only after email is "done" ─────────────────
     data = OrderSerializer(order).data
     data["_demo"] = {
         "warning"        : "⚠ DEMO ONLY — synchronous email simulation",

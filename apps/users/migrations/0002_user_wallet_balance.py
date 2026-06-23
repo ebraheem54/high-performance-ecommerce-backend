@@ -16,7 +16,7 @@ class Migration(migrations.Migration):
             field=models.DecimalField(
                 decimal_places=2,
                 default=500.0,
-                help_text="رصيد المحفظة — يُستخدم لمحاكاة الدفع (  Payment Simulation)",
+                help_text="Wallet balance used by the payment simulation.",
                 max_digits=10,
             ),
         ),

@@ -23,7 +23,6 @@ from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 
-# Number of orders processed per chunk iteration (Requirement 4)
 CHUNK_SIZE = 50
 
 
@@ -52,11 +51,9 @@ def run_daily_sales_batch_task(self, demo_chunk_size: int = None):
     """
     from apps.orders.models import Order
 
-    # Use demo override if provided, otherwise production default
     effective_chunk_size = demo_chunk_size if demo_chunk_size else CHUNK_SIZE
 
     now = timezone.now()
-    # Window: midnight yesterday → midnight today (UTC)
     end_dt   = now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_dt = end_dt - timedelta(days=1)
     date_label = start_dt.strftime("%Y-%m-%d")
@@ -66,8 +63,6 @@ def run_daily_sales_batch_task(self, demo_chunk_size: int = None):
         date_label, start_dt, end_dt,
     )
 
-    # ── Step 1: Collect qualifying order IDs ─────────────────────────────────
-    # Fetch IDs only — avoids pulling full ORM objects into memory at once.
     COMPLETED_STATUSES = [
         Order.Status.CONFIRMED,
         Order.Status.PROCESSING,
@@ -93,14 +88,10 @@ def run_daily_sales_batch_task(self, demo_chunk_size: int = None):
         logger.info("[BATCH] No orders found for %s. Done.", date_label)
         return {"date": date_label, "orders": 0, "revenue": 0, "chunks": 0}
 
-    # ── Step 2: Process in fixed-size chunks ─────────────────────────────────
-    # Synchronization note: each chunk is an independent read-only query.
-    # No cross-chunk locking needed — we are only reading committed data.
     for chunk_start in range(0, total_orders, effective_chunk_size):
         chunk_ids    = order_ids[chunk_start: chunk_start + effective_chunk_size]
         chunk_number = chunk_count + 1
 
-        # Aggregate revenue for this chunk only (one DB round-trip per chunk)
         from django.db.models import Sum
         chunk_revenue = (
             Order.objects
@@ -115,12 +106,11 @@ def run_daily_sales_batch_task(self, demo_chunk_size: int = None):
         logger.info(
             "[BATCH] Chunk %s/%s processed: %s orders, revenue=%.2f",
             chunk_number,
-            -(-total_orders // effective_chunk_size),   # ceiling division
+            -(-total_orders // effective_chunk_size),
             len(chunk_ids),
             chunk_revenue,
         )
 
-    # ── Step 3: Final summary ─────────────────────────────────────────────────
     logger.info(
         "[BATCH] Daily sales for %s COMPLETE — %s orders, "
         "total_revenue=%.2f, processed in %s chunk(s) of %s",
@@ -136,23 +126,6 @@ def run_daily_sales_batch_task(self, demo_chunk_size: int = None):
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ⚠ DEMO ONLY — Naive Batch Task (Requirement 4 — BEFORE solution)
-# ══════════════════════════════════════════════════════════════════════════════
-# Purpose:
-#   Simulate the before-solution approach where ALL matching orders are loaded
-#   into Python memory at once and processed in a single loop — NO chunking.
-#
-# Problems demonstrated vs the chunk-based solution:
-#   1. Memory: all Order objects loaded simultaneously (vs IDs-only in chunks)
-#   2. DB hold: one heavy SELECT holds the connection for the full duration
-#   3. No recovery point: failure mid-way loses all progress
-#   4. Scales poorly: memory grows linearly with order count → OOM at scale
-#
-# Triggered via: POST /api/core/trigger-batch-naive/  (admin only)
-# To REMOVE: delete this task + trigger_batch_naive_view + its URL pattern.
-# ══════════════════════════════════════════════════════════════════════════════
-
 @shared_task(bind=True)
 def run_daily_sales_batch_naive_task(self, days_back: int = 1):
     """
@@ -167,7 +140,6 @@ def run_daily_sales_batch_naive_task(self, days_back: int = 1):
     started = _time.time()
     now     = timezone.now()
     end_dt  = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    # days_back allows the demo to target a wider window when yesterday has 0 orders
     start_dt   = end_dt - timedelta(days=days_back)
     date_label = start_dt.strftime("%Y-%m-%d")
 
@@ -184,9 +156,6 @@ def run_daily_sales_batch_naive_task(self, days_back: int = 1):
         Order.Status.DELIVERED,
     ]
 
-    # ⚠ PROBLEM 1: Fetches FULL Order objects (not just IDs) into memory at once.
-    #   With 10 000 orders each object carries all field data → high RAM usage.
-    #   The chunk-based task fetches only IDs, keeping memory flat.
     all_orders = list(
         Order.objects
         .filter(
@@ -194,7 +163,7 @@ def run_daily_sales_batch_naive_task(self, days_back: int = 1):
             created_at__lt=end_dt,
             status__in=COMPLETED_STATUSES,
         )
-        .order_by("id")   # full objects — NOT .values_list("id", flat=True)
+        .order_by("id")
     )
 
     total_orders = len(all_orders)
@@ -221,9 +190,6 @@ def run_daily_sales_batch_naive_task(self, days_back: int = 1):
         total_orders,
     )
 
-    # ⚠ PROBLEM 2: Revenue summed in a Python loop instead of a DB-side
-    #   SQL SUM() aggregate. Every float addition happens in the application
-    #   server, wasting CPU that the database could handle more efficiently.
     total_revenue = 0.0
     for order in all_orders:
         total_revenue += float(order.total_price)

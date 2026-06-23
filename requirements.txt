@@ -32,3 +32,6 @@ locust>=2.20,<3.0
 
 # Production server — Resource Management (Requirement 2)
 gunicorn>=21.2,<22.0
+
+# Application metrics
+prometheus-client>=0.20,<1.0

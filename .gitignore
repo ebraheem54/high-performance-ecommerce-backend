@@ -1,4 +1,3 @@
-cat > .gitignore << 'EOF'
 # Python
 __pycache__/
 *.py[cod]
@@ -15,6 +14,7 @@ local_settings.py
 /media/
 /staticfiles/
 /static/
+/logs/
 
 # IDE
 .vscode/
@@ -22,7 +22,7 @@ local_settings.py
 *.swp
 *.swo
 
-# Environment (NEVER commit passwords!)
+# Environment
 .env
 .env.local
 .env.*.local
@@ -40,10 +40,12 @@ db.sqlite3
 
 # Poetry
 poetry.lock
-EOF
 
+# JMeter local outputs
+jmeter.log
+req9_jmeter/results/
+req9_jmeter/users.csv
+req9_jmeter/Req9 Full-System Stress Test - Optimized AFTER State.jmx
 
-# .gitignore (add these)
-.env
-.env.local
-.env.*.local
+# Local scratch files
+locustfile1.py

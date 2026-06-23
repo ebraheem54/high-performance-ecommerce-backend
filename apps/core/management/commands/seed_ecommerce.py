@@ -30,13 +30,13 @@ from apps.cart.models import CartItem
 User = get_user_model()
 fake = Faker()
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-LOCUST_USER_COUNT  = 100   # 100 individual users, each with own token (Req 5)
+# Seeder constants.
+LOCUST_USER_COUNT  = 100   # Individual users, each with their own token.
 REGULAR_USER_COUNT = 50    # Extra background users for realistic data
-NORMAL_PRODUCT_COUNT = 300 # High-stock products for normal load (Req 2)
-HOT_PRODUCT_COUNT    = 5   # LOW-stock products to trigger race conditions (Req 1)
+NORMAL_PRODUCT_COUNT = 300 # High-stock products for normal load.
+HOT_PRODUCT_COUNT    = 5   # Low-stock products to trigger race conditions.
 HOT_STOCK            = 10  # Intentionally scarce → guarantees race condition
-HISTORICAL_ORDER_COUNT = 200  # For Batch Processing daily report (Req 4)
+HISTORICAL_ORDER_COUNT = 200  # Historical data for daily reporting.
 
 LOCUST_PASSWORD = "LocustPass123!"
 LOCUST_EMAIL_TEMPLATE = "locust_{i}@test.com"
@@ -93,9 +93,9 @@ class Command(BaseCommand):
         if clean:
             self._clean_database()
 
-        self.stdout.write(self.style.SUCCESS("\n" + "═" * 65))
+        self.stdout.write(self.style.SUCCESS("\n" + "=" * 65))
         self.stdout.write(self.style.SUCCESS("  E-COMMERCE SEEDER — Professional Load Test Setup"))
-        self.stdout.write(self.style.SUCCESS("═" * 65))
+        self.stdout.write(self.style.SUCCESS("=" * 65))
 
         locust_users  = self._create_locust_users()
         regular_users = self._create_regular_users()
@@ -111,7 +111,7 @@ class Command(BaseCommand):
 
         self._print_summary(locust_users, regular_users, hot_products, normal_products)
 
-    # ── Cleanup ────────────────────────────────────────────────────────────────
+    # Cleanup.
     def _clean_database(self):
         self.stdout.write(self.style.WARNING("\n[CLEAN] Removing existing data..."))
         CartItem.objects.all().delete()
@@ -123,7 +123,7 @@ class Command(BaseCommand):
         User.objects.filter(is_superuser=False).delete()
         self.stdout.write(self.style.SUCCESS("[CLEAN] ✓ Done\n"))
 
-    # ── Users ──────────────────────────────────────────────────────────────────
+    # Users.
     def _create_locust_users(self):
         """
         Create 100 individual Locust users, each with a unique email.
@@ -172,7 +172,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"  ✓ {len(users)} background users created"))
         return users
 
-    # ── Products ───────────────────────────────────────────────────────────────
+    # Products.
     def _create_hot_products(self):
         """
         Requirement 1 — Race Condition Proof:
@@ -240,7 +240,7 @@ class Command(BaseCommand):
         ))
         return products
 
-    # ── Carts ──────────────────────────────────────────────────────────────────
+    # Carts.
     def _create_carts(self, users, products):
         """Pre-fill carts for background users to create realistic DB state."""
         self.stdout.write("[5/6] Creating carts for background users...")
@@ -261,7 +261,7 @@ class Command(BaseCommand):
         """
         pass  # Locust manages its own cart during the test
 
-    # ── Historical Orders ──────────────────────────────────────────────────────
+    # Historical orders.
     def _create_historical_orders(self, users, products):
         """
         Requirement 4 — Batch Processing:
@@ -350,22 +350,22 @@ class Command(BaseCommand):
             f"  → These will be processed by run_daily_sales_batch_task in chunks of 50"
         ))
 
-    # ── Summary ────────────────────────────────────────────────────────────────
+    # Summary.
     def _print_summary(self, locust_users, regular_users, hot_products, normal_products):
         all_products   = hot_products + normal_products
         total_stock    = sum(p.stock for p in all_products)
         order_count    = Order.objects.count()
 
-        self.stdout.write("\n" + self.style.SUCCESS("═" * 65))
+        self.stdout.write("\n" + self.style.SUCCESS("=" * 65))
         self.stdout.write(self.style.SUCCESS("  DATABASE SEEDED SUCCESSFULLY"))
-        self.stdout.write(self.style.SUCCESS("═" * 65))
+        self.stdout.write(self.style.SUCCESS("=" * 65))
         self.stdout.write(f"  Locust Users:        {len(locust_users):>6}  (unique tokens)")
         self.stdout.write(f"  Background Users:    {len(regular_users):>6}")
         self.stdout.write(f"  HOT Products:        {len(hot_products):>6}  (stock={HOT_STOCK} each ← Race Condition)")
         self.stdout.write(f"  Normal Products:     {len(normal_products):>6}  (stock 500-2000)")
         self.stdout.write(f"  Total Stock:         {total_stock:>6,} units")
         self.stdout.write(f"  Historical Orders:   {order_count:>6}  (for Batch Processing)")
-        self.stdout.write(self.style.SUCCESS("═" * 65))
+        self.stdout.write(self.style.SUCCESS("=" * 65))
         self.stdout.write(self.style.WARNING("\n  Locust Credentials (100 users):"))
         self.stdout.write(f"    Email:    locust_1@test.com … locust_{LOCUST_USER_COUNT}@test.com")
         self.stdout.write(f"    Password: {LOCUST_PASSWORD}")

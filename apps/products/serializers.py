@@ -15,6 +15,20 @@ class ProductSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "stock", "created_at"]
 
 
+class ProductPublicCacheSerializer(serializers.ModelSerializer):
+    """
+    Public product serializer used for cached read endpoints.
+
+    Stock is intentionally excluded because it changes frequently and should be
+    read from the database in checkout/reservation flows, not from Redis cache.
+    """
+
+    class Meta:
+        model = Product
+        fields = ["id", "name", "description", "price", "is_active", "created_at"]
+        read_only_fields = fields
+
+
 class ProductDetailSerializer(ProductSerializer):
     """Detailed product view including stock version (for admin/debug)."""
 

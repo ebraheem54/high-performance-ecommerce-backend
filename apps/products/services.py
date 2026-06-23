@@ -1,30 +1,17 @@
-"""
-Business logic for products.
-Synchronization Strategy:
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  OPTIMISTIC LOCKING  →  deduct_stock_optimistic()                  │
-  │    - Used for: pre-checkout stock check, cart add validation        │
-  │    - How: Read version → UPDATE WHERE version=X → retry if conflict │
-  │    - No DB-level lock held → high concurrency, may need retry       │
-  │                                                                     │
-  │  PESSIMISTIC LOCKING →  deduct_stock_pessimistic()                 │
-  │    - Used for: final checkout (called from orders.services)         │
-  │    - How: SELECT FOR UPDATE → holds row lock → no other TX can read │
-  │    - Guarantees atomicity at the cost of blocking other requests    │
-  └─────────────────────────────────────────────────────────────────────┘
-"""
+"""Business logic for products, stock updates, reservations, and reviews."""
 
 from django.db import transaction
 from django.utils import timezone
 import time
 import logging
 from apps.products.models import Product, InventoryLog, OrderLock
+from apps.core.logging_utils import log_service_call, log_user_event
 
 logger = logging.getLogger(__name__)
 
-# Maximum retry attempts for optimistic locking conflicts
+# Maximum retry attempts for optimistic locking conflicts.
 OPTIMISTIC_MAX_RETRIES = 5
-# Delay between retries (seconds) — gives other transactions time to commit
+# Delay between retries so competing transactions can commit.
 OPTIMISTIC_RETRY_DELAY = 0.05
 
 
@@ -38,31 +25,21 @@ def get_product_by_id(product_id: int):
     return Product.objects.get(id=product_id, is_active=True)
 
 
-# OPTIMISTIC LOCKING — Products & Inventory
+# Optimistic locking for product stock updates.
 @transaction.atomic
+@log_service_call(
+    "product.stock.deduct_optimistic",
+    context_builder=lambda args: {
+        "product_id": args["product_id"],
+        "quantity": args["quantity"],
+        "reason": args["reason"],
+    },
+)
 def deduct_stock_optimistic(
     product_id: int, quantity: int, reason: str = InventoryLog.Reason.PURCHASE
 ) -> bool:
-    """
-    Deduct stock using TRUE Optimistic Locking.
-    Algorithm (Synchronization point):
-      1. Read product WITHOUT any DB lock (snapshot read)
-      2. Attempt UPDATE WHERE id=X AND version=current_version
-         → If 1 row updated: we won the race, commit.
-         → If 0 rows updated: another transaction changed the row first,
-           version no longer matches → CONFLICT detected.
-      3. On conflict: caller retries (see deduct_stock_with_retry).
-    Why Optimistic here?
-      Cart additions and pre-checks don't need strong consistency.
-      Most of the time there is NO conflict, so we avoid the cost of
-      a DB-level lock entirely. Only retry on the rare collision.
-    Returns:
-      True  — stock deducted successfully
-      False — version conflict (caller should retry)
-    Raises:
-      ValueError — not enough stock available
-    """
-    # Step 1: Snapshot read — NO lock acquired
+
+    # Snapshot read without acquiring a database lock.
     try:
         product = Product.objects.get(id=product_id, is_active=True)
     except Product.DoesNotExist:
@@ -74,9 +51,8 @@ def deduct_stock_optimistic(
         )
     captured_version = product.version
 
-    # Step 2: Conditional UPDATE — only succeeds if version hasn't changed
     # Synchronization point: this is where the race condition is resolved.
-    # Optimistic Locking: update only if version has not changed since we read it
+    # The update only succeeds if the version has not changed since the read.
     updated_rows = Product.objects.filter(
         id=product_id,
         version=captured_version,   # ← the optimistic check
@@ -95,23 +71,24 @@ def deduct_stock_optimistic(
         )
         return False  # Signal conflict to caller
 
-    # Step 3: Audit log — record every stock change for traceability
+    # Record every stock change for traceability.
     InventoryLog.objects.create(
         product_id=product_id,
         quantity_change=-quantity,
         reason=reason,
         note=(f"[OPTIMISTIC] version {captured_version} → {captured_version + 1}"),
     )
-    logger.info(
-        "Optimistic stock deduct: product=%s qty=%s version %s→%s",
-        product_id,
-        quantity,
-        captured_version,
-        captured_version + 1,
-    )
     return True
 
 
+@log_service_call(
+    "product.stock.deduct_retry",
+    context_builder=lambda args: {
+        "product_id": args["product_id"],
+        "quantity": args["quantity"],
+        "reason": args["reason"],
+    },
+)
 def deduct_stock_with_retry(
     product_id: int,
     quantity: int,
@@ -119,17 +96,7 @@ def deduct_stock_with_retry(
     max_retries: int = OPTIMISTIC_MAX_RETRIES,
     retry_delay: float = OPTIMISTIC_RETRY_DELAY,
 ) -> bool:
-    """
-    Retry wrapper around deduct_stock_optimistic.
-    Implements the full Optimistic Locking pattern with automatic retry:
-      - On conflict (False return): wait briefly and retry
-      - On success (True return): done
-      - On ValueError (no stock): re-raise immediately — no point retrying
-      - After max_retries exhausted: raise RuntimeError
-    Resource Management (Requirement 2):
-      retry_delay with exponential back-off prevents thundering herd
-      when many workers compete for the same product simultaneously.
-    """
+
     for attempt in range(1, max_retries + 1):
         try:
             success = deduct_stock_optimistic(product_id, quantity, reason)
@@ -150,12 +117,12 @@ def deduct_stock_with_retry(
 
 
 @transaction.atomic
+@log_service_call(
+    "product.stock.deduct_pessimistic",
+    context_builder=lambda args: {"product_id": args["product"].id, "quantity": args["quantity"]},
+)
 def deduct_stock_pessimistic(product: Product, quantity: int) -> None:
-    """
-    Deduct stock from an already-locked product row.
-    Called from orders.services where SELECT FOR UPDATE was already issued.
-    The product object passed in is already under a DB-level lock.
-    """
+
     if product.stock < quantity:
         raise ValueError(
             f"Insufficient stock for '{product.name}': "
@@ -171,30 +138,22 @@ def deduct_stock_pessimistic(product: Product, quantity: int) -> None:
         reason=InventoryLog.Reason.PURCHASE,
         note=f"[PESSIMISTIC] checkout deduction version→{product.version}",
     )
-    logger.info(
-        "Pessimistic stock deduct: product=%s qty=%s new_stock=%s",
-        product.id, quantity, product.stock,
-    )
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# OPTIMISTIC LOCKING — Reviews
-# ═══════════════════════════════════════════════════════════════════════════════
+# Optimistic locking for reviews.
+@log_service_call(
+    "review.create",
+    context_builder=lambda args: {
+        "user_id": args["user"].id,
+        "product_id": args["product_id"],
+        "order_id": args["order_id"],
+        "rating": args["rating"],
+    },
+    result_builder=lambda result, args: {"review_id": result.id},
+)
 def create_review(
     user, product_id: int, order_id, rating: int, comment: str = ""
 ) -> "Review":
-    """
-    Create a product review with Optimistic Locking protection.
-    For reviews, two types of race conditions are possible:
-      1. Two requests from the same user submitting the same review simultaneously
-         → Resolved by unique_together = ("user", "product") constraint at DB level.
-         → The second INSERT raises IntegrityError → caught and re-raised clearly.
-      2. A review being updated while being read
-         → We use the version field on Review for concurrent update protection.
-    Why Optimistic here?
-      Reviews are infrequent writes. A DB-level lock on the review table
-      is expensive and unnecessary. Version-check is sufficient.
-    """
+
     from django.db import IntegrityError
     from apps.products.models import Review
 
@@ -207,11 +166,13 @@ def create_review(
                 rating=rating,
                 comment=comment,
             )
-            logger.info(
-                "Review created: user=%s product=%s rating=%s",
+            log_user_event(
                 user.id,
-                product_id,
-                rating,
+                "review.create",
+                product_id=product_id,
+                order_id=order_id,
+                rating=rating,
+                result="created",
             )
             return review
     except IntegrityError as exc:
@@ -222,13 +183,13 @@ def create_review(
 
 
 @transaction.atomic
+@log_service_call(
+    "product.restock",
+    context_builder=lambda args: {"product_id": args["product_id"], "quantity": args["quantity"]},
+    result_builder=lambda result, args: {"new_stock": result.stock},
+)
 def restock_product(product_id: int, quantity: int, note: str = "") -> Product:
-    """
-    Add stock to a product and log the change.
-    Uses Pessimistic Locking (select_for_update) because restocking is
-    an admin operation that must be serialized — two simultaneous restocks
-    of the same product could corrupt the total stock count.
-    """
+   
     # Synchronization point: lock this product row exclusively
     product = Product.objects.select_for_update().get(id=product_id)
     product.stock += quantity
@@ -246,13 +207,18 @@ def restock_product(product_id: int, quantity: int, note: str = "") -> Product:
 
 
 @transaction.atomic
+@log_service_call(
+    "product.reserve",
+    context_builder=lambda args: {
+        "product_id": args["product_id"],
+        "user_id": args["user_id"],
+        "quantity": args["quantity"],
+    },
+    result_builder=lambda result, args: {"lock_id": result.id},
+)
 def create_order_lock(product_id: int, user_id: int, quantity: int,
                       lock_minutes: int = 10) -> OrderLock:
-    """
-    Reserve stock for a user during checkout.
-    Prevents another user from buying the same units simultaneously.
-    Uses Pessimistic Locking to guarantee the reservation is exclusive.
-    """
+
     from datetime import timedelta
     # Pessimistic: lock the product row during reservation
     product = Product.objects.select_for_update().get(id=product_id)
@@ -267,9 +233,19 @@ def create_order_lock(product_id: int, user_id: int, quantity: int,
         quantity=quantity,
         expires_at=expires_at,
     )
+    log_user_event(
+        user_id,
+        "product.reserve",
+        product_id=product_id,
+        quantity=quantity,
+        lock_id=lock.id,
+        lock="pessimistic",
+        result="reserved",
+    )
     return lock
 
 
+@log_service_call("product.release_expired_locks")
 def release_expired_locks():
     """Remove all expired order locks (called periodically by Celery Beat)."""
     expired = OrderLock.objects.filter(expires_at__lt=timezone.now())
