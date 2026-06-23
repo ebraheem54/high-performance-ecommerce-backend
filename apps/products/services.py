@@ -5,7 +5,7 @@ from django.utils import timezone
 import time
 import logging
 from apps.products.models import Product, InventoryLog, OrderLock
-from apps.core.logging_utils import log_user_event
+from apps.core.logging_utils import log_service_call, log_user_event
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,14 @@ def get_product_by_id(product_id: int):
 
 # Optimistic locking for product stock updates.
 @transaction.atomic
+@log_service_call(
+    "product.stock.deduct_optimistic",
+    context_builder=lambda args: {
+        "product_id": args["product_id"],
+        "quantity": args["quantity"],
+        "reason": args["reason"],
+    },
+)
 def deduct_stock_optimistic(
     product_id: int, quantity: int, reason: str = InventoryLog.Reason.PURCHASE
 ) -> bool:
@@ -88,16 +96,17 @@ def deduct_stock_optimistic(
         reason=reason,
         note=(f"[OPTIMISTIC] version {captured_version} → {captured_version + 1}"),
     )
-    logger.info(
-        "Optimistic stock deduct: product=%s qty=%s version %s→%s",
-        product_id,
-        quantity,
-        captured_version,
-        captured_version + 1,
-    )
     return True
 
 
+@log_service_call(
+    "product.stock.deduct_retry",
+    context_builder=lambda args: {
+        "product_id": args["product_id"],
+        "quantity": args["quantity"],
+        "reason": args["reason"],
+    },
+)
 def deduct_stock_with_retry(
     product_id: int,
     quantity: int,
@@ -136,6 +145,10 @@ def deduct_stock_with_retry(
 
 
 @transaction.atomic
+@log_service_call(
+    "product.stock.deduct_pessimistic",
+    context_builder=lambda args: {"product_id": args["product"].id, "quantity": args["quantity"]},
+)
 def deduct_stock_pessimistic(product: Product, quantity: int) -> None:
     """
     Deduct stock from an already-locked product row.
@@ -157,13 +170,18 @@ def deduct_stock_pessimistic(product: Product, quantity: int) -> None:
         reason=InventoryLog.Reason.PURCHASE,
         note=f"[PESSIMISTIC] checkout deduction version→{product.version}",
     )
-    logger.info(
-        "Pessimistic stock deduct: product=%s qty=%s new_stock=%s",
-        product.id, quantity, product.stock,
-    )
-
 
 # Optimistic locking for reviews.
+@log_service_call(
+    "review.create",
+    context_builder=lambda args: {
+        "user_id": args["user"].id,
+        "product_id": args["product_id"],
+        "order_id": args["order_id"],
+        "rating": args["rating"],
+    },
+    result_builder=lambda result, args: {"review_id": result.id},
+)
 def create_review(
     user, product_id: int, order_id, rating: int, comment: str = ""
 ) -> "Review":
@@ -191,12 +209,6 @@ def create_review(
                 rating=rating,
                 comment=comment,
             )
-            logger.info(
-                "Review created: user=%s product=%s rating=%s",
-                user.id,
-                product_id,
-                rating,
-            )
             log_user_event(
                 user.id,
                 "review.create",
@@ -214,6 +226,11 @@ def create_review(
 
 
 @transaction.atomic
+@log_service_call(
+    "product.restock",
+    context_builder=lambda args: {"product_id": args["product_id"], "quantity": args["quantity"]},
+    result_builder=lambda result, args: {"new_stock": result.stock},
+)
 def restock_product(product_id: int, quantity: int, note: str = "") -> Product:
     """
     Add stock to a product and log the change.
@@ -238,6 +255,15 @@ def restock_product(product_id: int, quantity: int, note: str = "") -> Product:
 
 
 @transaction.atomic
+@log_service_call(
+    "product.reserve",
+    context_builder=lambda args: {
+        "product_id": args["product_id"],
+        "user_id": args["user_id"],
+        "quantity": args["quantity"],
+    },
+    result_builder=lambda result, args: {"lock_id": result.id},
+)
 def create_order_lock(product_id: int, user_id: int, quantity: int,
                       lock_minutes: int = 10) -> OrderLock:
     """
@@ -271,6 +297,7 @@ def create_order_lock(product_id: int, user_id: int, quantity: int,
     return lock
 
 
+@log_service_call("product.release_expired_locks")
 def release_expired_locks():
     """Remove all expired order locks (called periodically by Celery Beat)."""
     expired = OrderLock.objects.filter(expires_at__lt=timezone.now())

@@ -8,14 +8,18 @@ import time
 from django.db import transaction
 from django.utils import timezone
 from apps.orders.models import Order, OrderItem, Payment
-from apps.core.logging_utils import log_user_event
+from apps.core.logging_utils import log_service_call, log_user_event
 
-logger = logging.getLogger(__name__)
 payment_logger = logging.getLogger("payments")
 
 
 
 @transaction.atomic
+@log_service_call(
+    "order.checkout",
+    context_builder=lambda args: {"user_id": args["user"].id},
+    result_builder=lambda result, args: {"order_id": result.id},
+)
 def create_order_from_cart(user) -> Order:
     """
     Create an order from the user's cart in a single ACID transaction.
@@ -42,11 +46,6 @@ def create_order_from_cart(user) -> Order:
         p.id: p
         for p in Product.objects.select_for_update().filter(id__in=product_ids).order_by("id")
     }
-    logger.info(
-        "Pessimistic locks acquired on products %s for user=%s",
-        product_ids, user.id,
-    )
-
     for item in cart_items:
         locked_product = locked_products.get(item.product_id)
         if not locked_product:
@@ -94,10 +93,6 @@ def create_order_from_cart(user) -> Order:
 
     CartItem.objects.filter(user=user).delete()
 
-    logger.info(
-        "Order #%s created for user=%s total=%s (pessimistic checkout complete)",
-        order.id, user.id, total,
-    )
     log_user_event(
         user.id,
         "order.checkout",
@@ -111,13 +106,17 @@ def create_order_from_cart(user) -> Order:
     # Stock changed, so the public product list cache is no longer current.
     from django.core.cache import cache
     cache.delete("product_list")
-    logger.info("Cache invalidated for product list after order #%s", order.id)
 
     return order
 
 
 
 @transaction.atomic
+@log_service_call(
+    "payment.process",
+    context_builder=lambda args: {"order_id": args["order_id"], "method": args["method"]},
+    result_builder=lambda result, args: {"payment_id": result.id, "status": result.status},
+)
 def process_payment(order_id: int, method: str, transaction_id: str = "", user=None) -> Payment:
     """
     Mark the payment as completed.
@@ -136,11 +135,6 @@ def process_payment(order_id: int, method: str, transaction_id: str = "", user=N
         raise Order.DoesNotExist
     payment = Payment.objects.select_for_update().get(order_id=order_id)
 
-    logger.info(
-        "Pessimistic locks acquired on Order=%s and Payment for order=%s",
-        order_id, order_id,
-    )
-
     if order.status == Order.Status.CANCELLED:
         raise ValueError("Cannot process payment for a cancelled order.")
 
@@ -155,7 +149,6 @@ def process_payment(order_id: int, method: str, transaction_id: str = "", user=N
     order.status = Order.Status.PROCESSING
     order.save(update_fields=["status", "updated_at"])
 
-    logger.info("Payment completed for order=%s method=%s", order_id, method)
     payment_logger.info(
         "payment.completed user=%s order_id=%s payment_id=%s method=%s transaction_id=%s",
         order.user_id,
@@ -179,6 +172,11 @@ def process_payment(order_id: int, method: str, transaction_id: str = "", user=N
 
 
 @transaction.atomic
+@log_service_call(
+    "order.checkout_wallet",
+    context_builder=lambda args: {"user_id": args["user"].id},
+    result_builder=lambda result, args: {"order_id": result.id},
+)
 def checkout_with_wallet(user) -> Order:
     """
     Complete a wallet checkout in one transaction.
@@ -230,15 +228,7 @@ def checkout_with_wallet(user) -> Order:
             f"order total {total:.2f}."
         )
 
-    logger.info(
-        "[WALLET-PAYMENT] Processing payment for user=%s amount=%s ...",
-        locked_user.id, total,
-    )
     time.sleep(3)
-    logger.info(
-        "[WALLET-PAYMENT] Payment completed for user=%s amount=%s",
-        locked_user.id, total,
-    )
 
     locked_user.wallet_balance -= total
     locked_user.save(update_fields=["wallet_balance", "updated_at"])
@@ -275,10 +265,6 @@ def checkout_with_wallet(user) -> Order:
     from django.core.cache import cache
     cache.delete("product_list")
 
-    logger.info(
-        "Order #%s created for user=%s total=%s wallet_remaining=%s (wallet checkout)",
-        order.id, locked_user.id, total, locked_user.wallet_balance,
-    )
     log_user_event(
         locked_user.id,
         "order.checkout_wallet",
@@ -301,6 +287,11 @@ def get_user_orders(user):
     )
 
 @transaction.atomic
+@log_service_call(
+    "order.cancel",
+    context_builder=lambda args: {"order_id": args["order_id"]},
+    result_builder=lambda result, args: {"status": result.status},
+)
 def cancel_order(order_id: int, user=None) -> Order:
     """
     Cancel an order if it is still in PENDING or CONFIRMED state.
@@ -319,7 +310,6 @@ def cancel_order(order_id: int, user=None) -> Order:
         raise ValueError(f"Cannot cancel order in status: {order.status}")
     order.status = Order.Status.CANCELLED
     order.save(update_fields=["status", "updated_at"])
-    logger.info("Order #%s cancelled by user=%s", order_id, user)
     log_user_event(
         order.user_id,
         "order.cancel",
@@ -332,6 +322,11 @@ def cancel_order(order_id: int, user=None) -> Order:
 
 
 @transaction.atomic
+@log_service_call(
+    "order.status_update",
+    context_builder=lambda args: {"order_id": args["order_id"], "new_status": args["new_status"]},
+    result_builder=lambda result, args: {"status": result.status},
+)
 def update_order_status(order_id: int, new_status: str) -> Order:
     """
     Admin: update order status to any valid value.
@@ -341,5 +336,4 @@ def update_order_status(order_id: int, new_status: str) -> Order:
     order = Order.objects.select_for_update().get(id=order_id)
     order.status = new_status
     order.save(update_fields=["status", "updated_at"])
-    logger.info("Order #%s status updated to %s", order_id, new_status)
     return order
