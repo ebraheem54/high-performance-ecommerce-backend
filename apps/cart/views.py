@@ -16,6 +16,7 @@ from apps.cart import services
 from apps.cart.exceptions import ProductNotFoundError, OutOfStockError
 from apps.cart.serializers import CartItemSerializer, AddToCartSerializer
 from apps.core.logging_utils import log_user_error, log_user_event, log_user_warning
+from apps.core.metrics import record_cart_action
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ def _log_cart_issue(
 def _block_admin(request):
     """Return 403 response if requester is an admin, else None."""
     if request.user.is_staff:
+        record_cart_action("admin_blocked", "rejected")
         _log_cart_issue(
             request,
             "cart.admin_blocked",
@@ -88,6 +90,7 @@ def add_to_cart_view(request):
             serializer.validated_data["quantity"],
         )
     except ProductNotFoundError as e:
+        record_cart_action("add", "product_not_found")
         _log_cart_issue(
             request,
             "cart.add",
@@ -98,6 +101,7 @@ def add_to_cart_view(request):
         )
         return Response({"error": str(e)}, status=status.HTTP_404_NOT_FOUND)
     except OutOfStockError as e:
+        record_cart_action("add", "out_of_stock")
         _log_cart_issue(
             request,
             "cart.add",
@@ -108,6 +112,7 @@ def add_to_cart_view(request):
         )
         return Response({"error": str(e)}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
+        record_cart_action("add", "failed")
         _log_cart_issue(
             request,
             "cart.add",
@@ -117,6 +122,7 @@ def add_to_cart_view(request):
             product_id=serializer.validated_data["product_id"],
         )
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    record_cart_action("add", "success")
     return Response(CartItemSerializer(item).data, status=status.HTTP_201_CREATED)
 
 
@@ -129,6 +135,7 @@ def remove_from_cart_view(request, product_id):
         return err
     removed = services.remove_from_cart(request.user, product_id)
     if not removed:
+        record_cart_action("remove", "not_found")
         _log_cart_issue(
             request,
             "cart.remove",
@@ -138,6 +145,7 @@ def remove_from_cart_view(request, product_id):
             product_id=product_id,
         )
         return Response({"error": "Item not found in cart."}, status=status.HTTP_404_NOT_FOUND)
+    record_cart_action("remove", "success")
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -159,6 +167,7 @@ def update_cart_quantity_view(request, product_id):
     try:
         quantity = int(request.data.get("quantity", 1))
     except (TypeError, ValueError):
+        record_cart_action("quantity_update", "invalid_quantity")
         _log_cart_issue(
             request,
             "cart.quantity_update",
@@ -172,6 +181,7 @@ def update_cart_quantity_view(request, product_id):
     try:
         item = services.update_cart_item_quantity(request.user, product_id, quantity)
     except ValueError as exc:
+        record_cart_action("quantity_update", "failed")
         _log_cart_issue(
             request,
             "cart.quantity_update",
@@ -184,8 +194,10 @@ def update_cart_quantity_view(request, product_id):
         return Response({"error": str(exc)}, status=status.HTTP_404_NOT_FOUND)
 
     if item is None:
+        record_cart_action("quantity_update", "deleted")
         return Response({"deleted": True}, status=status.HTTP_200_OK)
 
+    record_cart_action("quantity_update", "success")
     return Response(CartItemSerializer(item).data, status=status.HTTP_200_OK)
 
 
@@ -197,4 +209,5 @@ def clear_cart_view(request):
     if err:
         return err
     count = services.clear_cart(request.user)
+    record_cart_action("clear", "success")
     return Response({"deleted": count})

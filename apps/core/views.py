@@ -8,17 +8,27 @@ import logging
 from threading import Lock
 from typing import Any
 
+from django.http import HttpResponse
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAdminUser
+from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.request import Request
 from rest_framework.response import Response
+
+from apps.core.metrics import render_metrics
 
 logger = logging.getLogger(__name__)
 
 CAPACITY_STRESS_DB_SAMPLE_EVERY = 20
 _capacity_stress_request_count = 0
 _capacity_stress_request_lock = Lock()
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def metrics_view(request: Request) -> HttpResponse:
+    payload, content_type = render_metrics()
+    return HttpResponse(payload, content_type=content_type)
 
 
 @api_view(["POST"])

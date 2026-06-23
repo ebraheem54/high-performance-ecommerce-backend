@@ -17,6 +17,7 @@ from apps.orders import services
 from apps.orders.models import Order, Payment
 from apps.orders.serializers import OrderSerializer, OrderListSerializer
 from apps.core.logging_utils import log_user_error, log_user_event, log_user_warning
+from apps.core.metrics import record_order_event
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ def checkout_view(request):
     Customer only — converts cart into a confirmed order (ACID transaction).
     """
     if request.user.is_staff:
+        record_order_event("checkout", "forbidden")
         _log_order_issue(
             request,
             "order.checkout",
@@ -96,6 +98,7 @@ def checkout_view(request):
     try:
         order = services.create_order_from_cart(request.user)
     except ValueError as e:
+        record_order_event("checkout", "failed")
         _log_order_issue(
             request,
             "order.checkout",
@@ -105,6 +108,7 @@ def checkout_view(request):
         )
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
+        record_order_event("checkout", "conflict")
         _log_order_issue(
             request,
             "order.checkout",
@@ -120,6 +124,7 @@ def checkout_view(request):
     except Exception:
         pass
 
+    record_order_event("checkout", "success")
     return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
 
@@ -149,14 +154,17 @@ def checkout_wallet_sync_view(request):
     import time as _time
 
     if request.user.is_staff:
+        record_order_event("wallet_checkout_sync", "forbidden")
         return Response({"error": "Admins cannot place orders."}, status=status.HTTP_403_FORBIDDEN)
 
     started = _time.time()
     try:
         order = services.checkout_with_wallet(request.user)
     except ValueError as e:
+        record_order_event("wallet_checkout_sync", "failed")
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
+        record_order_event("wallet_checkout_sync", "conflict")
         return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
 
     total_elapsed = round(_time.time() - started, 3)
@@ -169,6 +177,7 @@ def checkout_wallet_sync_view(request):
         "compare_with"   : "POST /api/orders/checkout-wallet-async/ (async — returns in <300ms)",
         "wallet_balance" : float(request.user.wallet_balance),
     }
+    record_order_event("wallet_checkout_sync", "success")
     return Response(data, status=status.HTTP_201_CREATED)
 
 
@@ -181,14 +190,17 @@ def checkout_wallet_async_view(request):
     Demo endpoint: wallet payment runs in a Celery task and returns 202.
     """
     if request.user.is_staff:
+        record_order_event("wallet_checkout_async", "forbidden")
         return Response({"error": "Admins cannot place orders."}, status=status.HTTP_403_FORBIDDEN)
 
     try:
         from apps.orders.tasks import process_wallet_payment_async
         task = process_wallet_payment_async.delay(request.user.id)
     except Exception as e:
+        record_order_event("wallet_checkout_async", "queue_unavailable")
         return Response({"error": f"Queue unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
+    record_order_event("wallet_checkout_async", "queued")
     return Response({
         "status"     : "queued",
         "task_id"    : task.id,
@@ -214,6 +226,7 @@ def cancel_order_view(request, order_id):
         user  = None if request.user.is_staff else request.user
         order = services.cancel_order(order_id, user)
     except Order.DoesNotExist:
+        record_order_event("cancel", "not_found")
         _log_order_issue(
             request,
             "order.cancel",
@@ -224,6 +237,7 @@ def cancel_order_view(request, order_id):
         )
         return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
     except ValueError as e:
+        record_order_event("cancel", "failed")
         _log_order_issue(
             request,
             "order.cancel",
@@ -240,6 +254,7 @@ def cancel_order_view(request, order_id):
     except Exception:
         pass
 
+    record_order_event("cancel", "success")
     return Response(OrderSerializer(order).data)
 
 
@@ -298,6 +313,7 @@ def process_payment_view(request, order_id):
     try:
         payment = services.process_payment(order_id, method, transaction_id, request.user)
     except Order.DoesNotExist:
+        record_order_event("payment", "not_found")
         _log_order_issue(
             request,
             "payment.process",
@@ -308,6 +324,7 @@ def process_payment_view(request, order_id):
         )
         return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
     except Exception as exc:
+        record_order_event("payment", "failed")
         _log_order_issue(
             request,
             "payment.process",
@@ -320,6 +337,7 @@ def process_payment_view(request, order_id):
         )
         return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
+    record_order_event("payment", "success")
     return Response({
         "order_id": order_id,
         "payment_id": payment.id,

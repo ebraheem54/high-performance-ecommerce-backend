@@ -128,12 +128,16 @@
         - static-data:/app/staticfiles
       env_file:
         - .env
+      environment:
+        PROMETHEUS_MULTIPROC_DIR: /dev/shm/prometheus-multiproc
       command: >
         sh -c "
           echo '[APP1] Waiting for database...'
           until nc -z ${DB_HOST} ${DB_PORT}; do
             sleep 0.5
           done
+          mkdir -p /dev/shm/prometheus-multiproc
+          rm -f /dev/shm/prometheus-multiproc/*
           echo '[APP1] Starting — worker-class=gthread, workers=8, threads=3'
           exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
 
@@ -156,12 +160,16 @@
         - static-data:/app/staticfiles
       env_file:
         - .env
+      environment:
+        PROMETHEUS_MULTIPROC_DIR: /dev/shm/prometheus-multiproc
       command: >
         sh -c "
           echo '[APP2] Waiting for database...'
           until nc -z ${DB_HOST} ${DB_PORT}; do
             sleep 0.5
           done
+          mkdir -p /dev/shm/prometheus-multiproc
+          rm -f /dev/shm/prometheus-multiproc/*
           echo '[APP2] Starting — worker-class=gthread, workers=8, threads=3'
           exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
 
@@ -184,12 +192,16 @@
         - static-data:/app/staticfiles
       env_file:
         - .env
+      environment:
+        PROMETHEUS_MULTIPROC_DIR: /dev/shm/prometheus-multiproc
       command: >
         sh -c "
           echo '[APP3] Waiting for database...'
           until nc -z ${DB_HOST} ${DB_PORT}; do
             sleep 0.5
           done
+          mkdir -p /dev/shm/prometheus-multiproc
+          rm -f /dev/shm/prometheus-multiproc/*
           echo '[APP3] Starting — worker-class=gthread, workers=8, threads=3'
           exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
 
@@ -212,12 +224,16 @@
         - static-data:/app/staticfiles
       env_file:
         - .env
+      environment:
+        PROMETHEUS_MULTIPROC_DIR: /dev/shm/prometheus-multiproc
       command: >
         sh -c "
           echo '[APP4] Waiting for database...'
           until nc -z ${DB_HOST} ${DB_PORT}; do
             sleep 0.5
           done
+          mkdir -p /dev/shm/prometheus-multiproc
+          rm -f /dev/shm/prometheus-multiproc/*
           echo '[APP4] Starting — worker-class=gthread, workers=8, threads=3'
           exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
 
@@ -240,12 +256,16 @@
         - static-data:/app/staticfiles
       env_file:
         - .env
+      environment:
+        PROMETHEUS_MULTIPROC_DIR: /dev/shm/prometheus-multiproc
       command: >
         sh -c "
           echo '[APP5] Waiting for database...'
           until nc -z ${DB_HOST} ${DB_PORT}; do
             sleep 0.5
           done
+          mkdir -p /dev/shm/prometheus-multiproc
+          rm -f /dev/shm/prometheus-multiproc/*
           echo '[APP5] Starting — worker-class=gthread, workers=8, threads=3'
           exec gunicorn --worker-class=gthread --workers=8 --threads=3 --access-logfile=- --error-logfile=- --bind=0.0.0.0:8000 config.wsgi:application
 
