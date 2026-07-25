@@ -1,13 +1,11 @@
-"""
-Async Celery tasks for cart app — Batch Processing (Requirement 4).
-"""
+"""Async Celery tasks for cart maintenance."""
 
 from celery import shared_task
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Process deletions in chunks to avoid holding a large table lock
+# Process deletions in chunks to avoid holding a large table lock.
 CLEANUP_CHUNK_SIZE = 100
 
 
@@ -35,7 +33,7 @@ def cleanup_abandoned_carts(days_old: int = 30):
 
     cutoff = timezone.now() - timedelta(days=days_old)
 
-    # ── Step 1: Collect stale IDs (lightweight — IDs only) ───────────────────
+    # Collect stale IDs first to avoid loading full objects.
     stale_ids = list(
         CartItem.objects
         .filter(updated_at__lt=cutoff)
@@ -46,7 +44,7 @@ def cleanup_abandoned_carts(days_old: int = 30):
     total_deleted = 0
     chunk_count   = 0
 
-    # ── Step 2: Delete in fixed-size chunks ───────────────────────────────────
+    # Delete stale rows in fixed-size chunks.
     for chunk_start in range(0, len(stale_ids), CLEANUP_CHUNK_SIZE):
         chunk_ids = stale_ids[chunk_start: chunk_start + CLEANUP_CHUNK_SIZE]
         deleted, _ = CartItem.objects.filter(id__in=chunk_ids).delete()

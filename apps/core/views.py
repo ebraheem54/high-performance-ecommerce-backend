@@ -8,17 +8,27 @@ import logging
 from threading import Lock
 from typing import Any
 
+from django.http import HttpResponse
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAdminUser
+from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.request import Request
 from rest_framework.response import Response
+
+from apps.core.metrics import render_metrics
 
 logger = logging.getLogger(__name__)
 
 CAPACITY_STRESS_DB_SAMPLE_EVERY = 20
 _capacity_stress_request_count = 0
 _capacity_stress_request_lock = Lock()
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def metrics_view(request: Request) -> HttpResponse:
+    payload, content_type = render_metrics()
+    return HttpResponse(payload, content_type=content_type)
 
 
 @api_view(["POST"])
@@ -40,10 +50,6 @@ def trigger_batch_view(request: Request) -> Response:
     try:
         from apps.core.tasks import run_daily_sales_batch_task, CHUNK_SIZE
 
-        # ── Optional demo parameter: override chunk_size for the screenshot ───
-        # This does NOT change the global CHUNK_SIZE constant.
-        # Passing chunk_size=10 with 33 orders → ceil(33/10) = 4 chunks.
-        # Omitting it uses the production default (CHUNK_SIZE=50).
         raw = request.query_params.get("chunk_size") or request.data.get("chunk_size")
         demo_chunk_size = None
         if raw is not None:
@@ -86,17 +92,6 @@ def trigger_batch_view(request: Request) -> Response:
         )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# DEMO ONLY — Capacity Stress View (Requirement 2)
-# ══════════════════════════════════════════════════════════════════════════════
-# Purpose:
-#   Lightweight Locust endpoint for Requirement 2. It avoids normal ORM work and
-#   samples pg_stat_activity occasionally, then closes that measurement
-#   connection so the demo endpoint does not inflate persistent DB connections.
-#
-# To REMOVE: delete this function + its URL pattern in urls.py.
-# ══════════════════════════════════════════════════════════════════════════════
-
 class CapacityStressView(generics.GenericAPIView):
     """
     POST /api/core/capacity-stress/  — admin only
@@ -128,7 +123,6 @@ class CapacityStressView(generics.GenericAPIView):
             or request_count % CAPACITY_STRESS_DB_SAMPLE_EVERY == 0
         )
 
-        # Sampling pg_stat_activity every request adds measurable DB work under load.
         db_conn_count = None
         if should_sample_db:
             try:
@@ -155,9 +149,7 @@ class CapacityStressView(generics.GenericAPIView):
             db_conn_count,
         )
 
-        # Authentication may touch the DB before this view runs. This endpoint is
-        # a load-test helper, so close its request connection instead of keeping
-        # it in the per-thread persistent pool.
+        # Avoid inflating persistent DB connections during capacity sampling.
         connection.close()
 
         return Response(
@@ -185,17 +177,6 @@ class CapacityStressView(generics.GenericAPIView):
             status=status.HTTP_200_OK,
         )
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ⚠ DEMO ONLY — Trigger Naive Batch (Requirement 4 — BEFORE solution)
-# ══════════════════════════════════════════════════════════════════════════════
-# Purpose:
-#   HTTP endpoint to manually trigger run_daily_sales_batch_naive_task.
-#   Accepts optional {"days_back": 7} in the request body to widen the
-#   date window when yesterday has 0 orders (e.g. fresh DB).
-#
-# To REMOVE: delete this function + its URL pattern in urls.py.
-# ══════════════════════════════════════════════════════════════════════════════
 
 @api_view(["POST"])
 @permission_classes([IsAdminUser])

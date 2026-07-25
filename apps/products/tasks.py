@@ -18,10 +18,11 @@ def release_expired_locks_task():
 
 @shared_task
 def invalidate_product_cache():
-    """Invalidate the Redis product list cache after bulk changes."""
+    """Invalidate Redis product read caches after bulk changes."""
     from django.core.cache import cache
     cache.delete("product_list")
-    return "Product list cache invalidated."
+    cache.delete("top_selling_products")
+    return "Product read caches invalidated."
 
 
 @shared_task

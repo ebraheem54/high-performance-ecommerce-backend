@@ -27,10 +27,12 @@ RUN python -m venv /py && \
     fi && \
     rm -rf /tmp && \
     apk del .tmp-build-deps && \
+    mkdir -p /prometheus-multiproc && \
     adduser \
         --disabled-password \
         --no-create-home \
-        django-user
+        django-user && \
+    chown -R django-user:django-user /prometheus-multiproc
 ENV PATH="/py/bin:$PATH"
 COPY . /app
 USER django-user
